@@ -19,8 +19,6 @@ class CoreTransformerEncoder(nn.Module):
 
     """
 
-
-
     def __init__(self, d_model, nhead, dropout, mask= None, clip_value = 10):
         super().__init__()
         self.d_model = d_model
