@@ -1,7 +1,6 @@
 import torch 
-import torch.nn as nn, F
-from torch.nn.modules import TransformerEncoderLayer
-
+import torch.nn as nn
+import torch.nn.functional as F
 
 class CoreTransformerEncoder(nn.Module):
 
@@ -23,20 +22,20 @@ class CoreTransformerEncoder(nn.Module):
 
 
     def __init__(self, d_model, nhead, dropout, mask= None, clip_value = 10):
-        super(CoreTransformerEncoder, self).init_()
+        super().__init__()
         self.d_model = d_model
         self.nhead = nhead
         self.dropout = dropout 
         self.mask = mask 
         self.clip_value = clip_value 
-        self.layer_norm == nn.LayerNorm(d_model)
+        self.layer_norm = nn.LayerNorm(d_model)
         self.attn = GeneralizedAttention(d_model, nhead, mask, clip_value)
         self.head_dim = d_model // nhead
         assert d_model % nhead == 0, "latent_dim must be divisible by num of heads"
 
         self.feedforward = nn.Sequential (
             nn.Linear(d_model, d_model * 4), 
-            nn.GeLU(), 
+            nn.GELU(), 
             nn.Dropout(dropout),
             nn.Linear(4 * d_model, d_model), 
             nn.Dropout(dropout)
@@ -77,7 +76,7 @@ class GeneralizedAttention(nn.Module):
     """
 
     def __init__(self, d_model, nhead, mask=None, clip_value = 10):
-        super(GeneralizedAttention, self).init_()
+        super().__init__()
         self.d_model = d_model
         self.nhead = nhead
         self.mask = mask

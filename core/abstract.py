@@ -3,9 +3,6 @@ import numpy as np
 from abc import ABC, abstractmethod
 from typing import Any, List, Union, Tuple
 
-from config import MoleculeConfig
-
-Config = MoleculeConfig  # Type alias for configs
 Instance = Any  # Type alias. An instance is any initial representation of a problem instance, like a dictionary.
 
 
@@ -15,7 +12,7 @@ class BaseTrajectory(ABC):
     """
     @staticmethod
     @abstractmethod
-    def init_batch_from_instance_list(config: MoleculeConfig, instances: List[Instance], network: torch.nn.Module, device: torch.device):
+    def init_batch_from_instance_list(config, instances: List[Instance], network: torch.nn.Module, device: torch.device):
         """
         Takes a list of problem instances and returns a list of `BaseTrajectory`.
 

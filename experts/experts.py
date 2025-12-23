@@ -9,14 +9,16 @@ from model.core_transformer_block import CoreTransformerEncoder
 # normalization for interaction components in Flow Expert? 
 
 class DistillationColumn(nn.Module):
+    
     def __init__(self, config):
         super(DistillationColumn, self).__init__()
         self.name = "distillation_column"
         self.config = config 
-        self.latent_dim = config.latent_dim
+        self.latent_dim = self.config.latent_dim
         self.logit_linear = nn.Linear(in_features = self.latent_dim, out_features = 1)
         self.df_categorical = nn.Linear(in_features = self.latent_dim, out_features = 100)
-        self.df_and_type_embed = nn.Embedding(in_features = 1, out_features =  self.latent_dim)
+        self.df_and_type_embed = nn.Embedding(num_embeddings = 1, embedding_dim=self.latent_dim)
+
 
     def embed(self, df: torch.FloatTensor):
         return self.df_and_type_embed(df)
@@ -24,21 +26,19 @@ class DistillationColumn(nn.Module):
     def predict(self, x: torch.FloatTensor):
 
         # x is the embedding of shape (batch, num_nodes, latent_dim)
-        
         return {
             "picked_logit": self.logit_linear(x), 
             "distillate_fraction_categorical": self.df_categorical(x)
             }
-    
 
 class Decanter(nn.Module):
     def __init__(self, config):
         super(Decanter, self).__init__()
         self.name = "decanter"
         self.config = config 
-        self.latent_dim = config.latent_dim 
+        self.latent_dim = self.config.latent_dim 
         self.logit_linear = nn.Linear(in_features = self.latent_dim, out_features = 1)
-        self.type_embed = nn.Embedding(in_features = 1, out_features = self.latent_dim)
+        self.type_embed = nn.Embedding(num_embeddings= 1, embedding_dim= self.latent_dim)
 
     def embed(self, batch_size: int):
         return self.type_embed(
@@ -54,13 +54,17 @@ class Decanter(nn.Module):
             }
     
 class Mixer(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, mixer_mask):
         super(Decanter, self).__init__()
         self.name = "mixer"
         self.config = config 
-        self.latent_dim = config.latent_dim
+        self.mixer_mask = mixer_mask
+        self.latent_dim = self.config.latent_dim
+        self.query_linear_proj = nn.Linear(self.latent_dim, self.latent_dim)
+        self.key_linear_proj = nn.Linear(self.latent_dim, self.latent_dim)
+        self.scale_constant = 10
         self.logit_linear = nn.Linear(in_features = self.latent_dim, out_features = 1)
-        self.type_embed = nn.Embedding(in_features = 1, out_features = self.latent_dim)
+        self.type_embed = nn.Embedding(num_embeddings= 1, embedding_dim= self.latent_dim)
 
     def embed(self, batch_size: int):
         return self.type_embed(
@@ -68,11 +72,20 @@ class Mixer(nn.Module):
         )
         
     def predict(self, x: torch.FloatTensor):
-        # x is the embedding of shape (batch, num_nodes, latent_dim)
+
+        # x is the embedding of shape (batch_size, num_nodes, latent_dim)
+        query = self.query_linear_proj(x)
+        key = self.key_linear_proj(x)
+        scores = torch.einsum('bnd, bmd -> bnm', query, key)
+        scores = self.scale_constant * torch.tanh(scores)
+
+        # mask out not allowed nodes (e.g self connections, system source nodes)
+        scores = scores.masked_fill(self.mixer_mask == 0, float('-inf')) 
 
         return {
-            "picked_logit": self.logit_linear(x), 
-            }
+        "picked_logit": self.logit_linear(x), # (batch_size, num_nodes, 1)
+        "target_scores": scores # (batch_size, num_nodes, num_nodes)
+        } 
     
 
 class Split(nn.Module):
@@ -80,10 +93,10 @@ class Split(nn.Module):
         super(Split, self).__init__()
         self.name = "split"
         self.config = config 
-        self.latent_dim = config.latent_dim
+        self.latent_dim = self.config.latent_dim
         self.logit_linear = nn.Linear(in_features = self.latent_dim, out_features = 1)
         self.split_ratio_categorical = nn.Linear(in_features = self.latent_dim, out_features = 100)
-        self.split_ratio_and_type_embed = nn.Embedding(in_features = 1, out_features = self.latent_dim)
+        self.split_ratio_and_type_embed = nn.Embedding(num_embeddings= 1, embedding_dim= self.latent_dim)
 
     def embed(self, sr: torch.FloatTensor):
         return self.split_ratio_and_type_embed(sr)
@@ -103,7 +116,7 @@ class Recycler(nn.Module):
         self.name = "recycler"
         self.config = config 
         self.recycler_mask = recycler_mask 
-        self.latent_dim = config.latent_dim 
+        self.latent_dim = self.config.latent_dim 
         self.logit_linear = nn.Linear(in_features = self.latent_dim, out_features = 1)
         self.query_linear_proj = nn.Linear(self.latent_dim, self.latent_dim)
         self.key_linear_proj = nn.Linear(self.latent_dim, self.latent_dim)
@@ -134,7 +147,7 @@ class AddSolvent(nn.Module):
         self.latent_dim = config.latent_dim 
 
         self.logit_linear = nn.Linear(in_features = self.latent_dim, out_features = 1)
-        self.type_embed = nn.Linear(in_features = 4, out_features = self.latent_dim)
+        self.type_embed = nn.Embedding( num_embeddings= 4, embedding_dim = self.latent_dim)
 
         self.prediction_mlp = nn.Sequential(
             nn.Linear(self.latent_dim + 4, 2 * self.latent_dim),
@@ -166,21 +179,21 @@ class AddSolvent(nn.Module):
         } 
     
 class FlowExpert(nn.Module):
-    def __init__(self,config):
+    def __init__(self, config):
         super(FlowExpert, self).__init__()
         self.config = config 
-        self.flow_latent_dim = config.latent_dim / 8
-        self.num_trf_blocks = config.num_trf_flow_blocks
+        self.flow_latent_dim = self.config.flow_latent_dim
+        self.num_trf_blocks = self.config.num_trf_flow_blocks
 
         self.flow_trf_encoder = nn.ModuleList([])
         for _ in range(self.num_trf_blocks):
-            block = CoreTransformerEncoder(d_model = self.flow_latent_dim, nhead = 4, dropout = config.dropout,
+            block = CoreTransformerEncoder(d_model = self.flow_latent_dim, nhead = 4, dropout = self.config.dropout,
                                           )
             self.flow_trf_encoder.append(block)
 
         self.component_linear = nn.Linear(in_features = 3, out_features = self.flow_latent_dim)
         self.edge_linear = nn.Linear(in_features = 1, out_features = self.flow_latent_dim)
-        self.flow_latent_upscale = nn.Linear (in_features = self.flow_latent_dim, out_features = config.latent_dim)
+        self.flow_latent_upscale = nn.Linear (in_features = self.flow_latent_dim, out_features = self.config.latent_dim)
 
     def forward(self, component_params, interaction_params, amount):
 
@@ -195,13 +208,14 @@ class FlowExpert(nn.Module):
         return self.flow_latent_upscale(flow_embedding) # (batch_size, latent_dim)
 
 class EdgeFlowExpert(nn.Module):
+    
     def __init__(self, config, flow_expert: FlowExpert):
         super(EdgeFlowExpert, self).__init__()
         self.flow_expert = flow_expert 
-        self.latent_dim = config.latent_dim
+        self.latent_dim = self.config.latent_dim
 
         # no edge connection embedding 
-        self.is_recycle_emb = nn.Embedding(in_features = 2, out_features = self.latent_dim) # 0 for no, 1 for yes
+        self.is_recycle_emb = nn.Embedding(num_embeddings= 2, embedding_dim = self.latent_dim) # 0 for no, 1 for yes
 
     def forward(self, x):
         latent_flow = self.flow_expert(x) # check how to make this as component_params, interactions_params etc
@@ -215,7 +229,7 @@ class OpenStreamExpert(nn.Module):
     def __init__(self, config, flow_expert: FlowExpert):
         super(OpenStreamExpert, self).__init__()
         self.flow_expert = flow_expert 
-        self.latent_dim = config.latent_dim
+        self.latent_dim = self.config.latent_dim
         self.linear_transform_open_stream = nn.Linear(self.latent_dim, self.latent_dim)
 
     def forward(self, x):
@@ -223,6 +237,3 @@ class OpenStreamExpert(nn.Module):
         open_stream_embed = self.linear_transform_open_stream(latent_flow)
         
         return open_stream_embed
-
-
-
