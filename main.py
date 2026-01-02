@@ -179,7 +179,7 @@ if __name__ == '__main__':
     torch.manual_seed(gen_config.seed)
 
     # Setup the neural network for training
-    network = FlowsheetNetwork(gen_config.training_device)
+    network = FlowsheetNetwork(gen_config, env_config, gen_config.training_device)
 
     # Load checkpoint if needed
     if gen_config.load_checkpoint_from_path is not None:
@@ -237,7 +237,7 @@ if __name__ == '__main__':
             print(f"Generating dataset.")
             network_weights = copy.deepcopy(network.get_weights())
 
-            mlflow.log_params({k: v for k, v in vars(gen_config).items() if isinstance(v, (int, float, str, bool))})
+            #mlflow.log_params({k: v for k, v in vars(gen_config).items() if isinstance(v, (int, float, str, bool))})
 
             generated_loggable_dict, generated_text_to_save = train_for_one_epoch(
                 epoch, gen_config, env_config, network, network_weights, optimizer, best_validation_metric
@@ -253,8 +253,8 @@ if __name__ == '__main__':
             save_checkpoint(checkpoint, "last_model.pt", gen_config)
 
             # log metrics per epoch 
-            for key, val in generated_loggable_dict.items():
-                mlflow.log_metric(key, val, step=epoch)
+            '''for key, val in generated_loggable_dict.items():
+                mlflow.log_metric(key, val, step=epoch)'''
 
             if val_metric > best_validation_metric:
                 print(">> Got new best model.")

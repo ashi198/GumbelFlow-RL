@@ -1,6 +1,8 @@
 import numpy as np 
 import os, datetime, copy
 import environment.phase_equilibria.phase_eq_handling as phase_eq_generation
+from environment import units 
+import torch
 
 class GeneralConfig:
 
@@ -27,11 +29,13 @@ class GeneralConfig:
 
         # Training
         self.num_dataloader_workers = 3  # Number of workers for creating batches for training
-        self.CUDA_VISIBLE_DEVICES = "0,1"  # Must be set, as ray can have problems detecting multiple GPUs
+        self.CUDA_VISIBLE_DEVICES = "0,1,2,3"  # Must be set, as ray can have problems detecting multiple GPUs
         self.training_device = "cpu"  # Device on which to perform the supervised training
-        self.num_epochs = 1000  # Number of epochs (i.e., passes through training set) to train
+        self.num_epochs = 2  # Number of epochs (i.e., passes through training set) to train
         self.batch_size_training = 64 #Batch size to use for the supervised training during finetuning. 
         self.num_batches_per_epoch = 20  # Can be None, then we just do one pass through generated dataset
+
+        self.wall_clock_limit = None
 
         # Optimizer
         self.optimizer = {
@@ -112,6 +116,13 @@ class EnvConfig:
         # dict with pure component data (e.g., molar masses "M") used by literature NPV path
         self.dict_pure_component_data = self.phase_eq_generator.load_pure_component_data()
 
+        # make a components tensor for Add solvent 
+        self.component_names = list(self.dict_pure_component_data.keys())
+
+        self.components_tensor = torch.tensor([self.dict_pure_component_data[name]["critical_data"] for name in self.component_names],
+            dtype=torch.float32
+        )
+
         # Shuffle option for feed component order (usually keep False for stable tests)
         self.shuffle_order_of_components = False
 
@@ -122,7 +133,7 @@ class EnvConfig:
 
         # Build dynamic price/cost maps that always match the global component list
         names = self.phase_eq_generator.names_components
-        num_components = len(names)
+        self.num_components = len(names)
 
         # Uniform defaults (edit these two numbers to tune all components at once)
         _uniform_product_price_per_mol = 100.0  # value for pure product streams (per mole) in "generic" mode
@@ -132,12 +143,12 @@ class EnvConfig:
         _uniform_solvent_cost_per_kg = 0.05  # cost per kg of solvent in "literature" mode
 
         # Generic (per-mole) pricing/costs: component-indexed dicts
-        self.product_price_per_component = {idx: _uniform_product_price_per_mol for idx in range(num_components)}
-        self.solvent_cost_per_component_mol = {idx: _uniform_solvent_cost_per_mol for idx in range(num_components)}
+        self.product_price_per_component = {idx: _uniform_product_price_per_mol for idx in range(self.num_components)}
+        self.solvent_cost_per_component_mol = {idx: _uniform_solvent_cost_per_mol for idx in range(self.num_components)}
 
         # Literature (per-kg) pricing/costs
         self.lit_product_value_per_kg = _uniform_product_value_per_kg
-        self.solvent_cost_per_component_kg = {idx: _uniform_solvent_cost_per_kg for idx in range(num_components)}
+        self.solvent_cost_per_component_kg = {idx: _uniform_solvent_cost_per_kg for idx in range(self.num_components)}
 
         self.steam_cost_per_kg = 0.04  # €/kg steam, used in literature NPV calc
 
@@ -165,22 +176,31 @@ class EnvConfig:
         # Unit definitions: how many outputs, whether they need a continuous spec (range),
         # and which level to go to next.
         self.unit_types = {
-            "distillation_column": {"num": 1, "output_streams": 2, "cont_range": [0.01, 0.99], "next_level": 3},
-            "decanter":            {"num": 1, "output_streams": 2, "cont_range": None, "next_level": 0},
-            "split":               {"num": 1, "output_streams": 2, "cont_range": [0.01, 0.99], "next_level": 3},
-            "mixer":               {"num": 1, "output_streams": 1, "cont_range": None, "next_level": 2},
-            "recycle":             {"num": 1, "output_streams": 1, "cont_range": None, "next_level": 5},
-            "add_solvent":         {"num": len(self.phase_eq_generator.names_components),
-                                    "output_streams": 1, "cont_range": [0.01, 10], "next_level": 3},
+            "distillation_column": {"num": 1, "output_streams": 2, "cont_range": [0.01, 0.99]},
+            "decanter":            {"num": 1, "output_streams": 2, "cont_range": None},
+            "split":               {"num": 1, "output_streams": 2, "cont_range": [0.01, 0.99]},
+            "mixer":               {"num": 1, "output_streams": 1, "cont_range": None},
+            "recycle":             {"num": 1, "output_streams": 1, "cont_range": None},
+            "add_solvent":         {"num": 1,"output_streams": 1, "cont_range": [0.01, 10]},
         }
 
+        self.distillation_column = units.distillation_column()
 
         # Stable index -> unit type mapping (flat catalog)
         self.units_map_indices_type = []
         for key in self.unit_types.keys():
             for _ in range(self.unit_types[key]["num"]):
                 self.units_map_indices_type.append(key)
+
         self.num_units = len(self.units_map_indices_type)
+
+        # index where "add_solvent" block starts
+        self.add_solvent_start_index = None
+        for i, key in enumerate(self.units_map_indices_type):
+            if key == "add_solvent":
+                self.add_solvent_start_index = i
+                break
+
 
         # Action limits
         self.max_total_units = 10    # overall cap on placed units (excluding feed)
@@ -209,6 +229,25 @@ class EnvConfig:
         self.mb_atol = 1e-6 # absolute tolerance
         self.mb_severe_atol = 1e-3
         self.mb_rtol = 1e-8 #relative tolerabce
+
+        
+        # List of mappings for params for distillation, split, add_solvent
+        self.DF_distillation_map = np.linspace(0.01, 0.99, 100)
+        self.split_ratio_map = np.linspace(0.01, 0.99, 100)
+        self.acetone_conc_map = np.linspace(0.01, 9.99, 100)
+        self.benzene_conc_map = np.linspace(0.01, 9.99, 100)
+        self.butanol_conc_map = np.linspace(0.01, 9.99, 100)
+        self.tol_conc_map = np.linspace(0.01, 9.99, 100)
+        self.water_conc_map = np.linspace(0.01, 9.99, 100)
+
+        self.add_solvent_comp_map = {
+            "acetone": self.acetone_conc_map,
+            "benzene": self.benzene_conc_map, 
+            "butanol": self.butanol_conc_map, 
+            "toluene": self.tol_conc_map, 
+            "water": self.water_conc_map
+                } 
+
 
     # Random feed generator
     def create_random_problem_instance(self):

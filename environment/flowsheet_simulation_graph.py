@@ -8,7 +8,6 @@ import networkx as nx
 import scipy.optimize as opt
 
 from environment import units
-from config import EnvConfig
 
 class FlowsheetSimulationGraph:
 
@@ -35,8 +34,8 @@ class FlowsheetSimulationGraph:
       - 'phase_eq' (when needed)
     """
 
-    def __init__(self, feed_stream_information: Dict[str, Any], config):
-        self.env_config = EnvConfig 
+    def __init__(self, feed_stream_information: Dict[str, Any], env_config):
+        self.env_config = env_config 
         self.feed_stream_information = feed_stream_information
 
         self.graph = nx.MultiDiGraph()
@@ -577,7 +576,7 @@ class FlowsheetSimulationGraph:
                 name_i = names[self.current_indices[i]]
                 name_j = names[self.current_indices[j]]
                 gij = np.asarray(
-                    self.config.phase_eq_generator.compute_inf_dilution_act_coeffs(name_i, name_j, T),
+                    self.env_config.phase_eq_generator.compute_inf_dilution_act_coeffs(name_i, name_j, T),
                     dtype=float,
                 )
                 # Expect exactly [γ(i→j), γ(j→i)]
@@ -614,7 +613,7 @@ class FlowsheetSimulationGraph:
                 if d.get("is_recycle", False)]
 
     def _sum_inbound_streams(self, node_id: int) -> np.ndarray:
-        num_comp = self.config.max_number_of_components
+        num_comp = self.env_config.max_number_of_components
         acc = np.zeros(num_comp, dtype=float)
 
         for u, v, key, data in self.graph.in_edges(node_id, keys=True, data=True):
@@ -655,9 +654,9 @@ class FlowsheetSimulationGraph:
             return
         tol = 1e-10
         indices = [i for i, x in enumerate(out) if x > tol]
-        names = [self.config.phase_eq_generator.names_components[i] for i in indices]
+        names = [self.env_config.phase_eq_generator.names_components[i] for i in indices]
         try:
-            phase_eq_dict = self.config.phase_eq_generator.search_subsystem_phase_eq(names)
+            phase_eq_dict = self.env_config.phase_eq_generator.search_subsystem_phase_eq(names)
             self.graph.nodes[node_id]["phase_eq"] = phase_eq_dict
         except Exception:
             # If a ternary does not exist, we simply leave phase_eq unset; the next unit
@@ -738,8 +737,8 @@ class FlowsheetSimulationGraph:
                 break
 
     def _set_active_phase_eq_from_current_indices(self) -> None:
-        names = [self.config.phase_eq_generator.names_components[i] for i in self.current_indices]
-        peq = self.config.phase_eq_generator.search_subsystem_phase_eq(names)
+        names = [self.env_config.phase_eq_generator.names_components[i] for i in self.current_indices]
+        peq = self.env_config.phase_eq_generator.search_subsystem_phase_eq(names)
         # normalize indices once
         idx = (peq.get("indices")
                or (peq.get("vle") or {}).get("indices_components")
@@ -754,7 +753,7 @@ class FlowsheetSimulationGraph:
         Compare base feed + solvent added vs sum of all *leaving* product streams.
         """
 
-        num_comp = self.config.max_number_of_components
+        num_comp = self.env_config.max_number_of_components
 
         # base feed (sum of feed nodes 'out0')
         base_feed = np.zeros(num_comp, dtype=float)
@@ -826,8 +825,8 @@ class FlowsheetSimulationGraph:
 
         # --- common knobs / helpers ---
         epsilon_for_flowrates = 1e-4
-        maxC = self.config.max_number_of_components
-        names = self.config.phase_eq_generator.names_components
+        maxC = self.env_config.max_number_of_components
+        names = self.env_config.phase_eq_generator.names_components
 
         # feed components (before any solvent was added)
         feed_comp_global = list(self.feed_stream_information.get("indices_components_in_feeds", []))
@@ -883,7 +882,7 @@ class FlowsheetSimulationGraph:
                     yield nid, ut, nd
 
         # --- Branch by NPV version ---
-        version = getattr(self.config, "npv_version", "generic").lower()
+        version = getattr(self.env_config, "npv_version", "generic").lower()
 
         # Counters shared by some branches
         sum_n_leaving = 0.0
@@ -931,10 +930,10 @@ class FlowsheetSimulationGraph:
         #     return npv, normed
 
         if version == "generic":
-            # Use config-driven costs
-            unit_costs = getattr(self.config, "unit_costs_generic", {}) or {}
-            product_price = getattr(self.config, "product_price_per_component", {}) or {}
-            solvent_cost_per_mol = getattr(self.config, "solvent_cost_per_component_mol", {}) or {}
+            # Use env_config-driven costs
+            unit_costs = getattr(self.env_config, "unit_costs_generic", {}) or {}
+            product_price = getattr(self.env_config, "product_price_per_component", {}) or {}
+            solvent_cost_per_mol = getattr(self.env_config, "solvent_cost_per_component_mol", {}) or {}
             specification_pure = 0.99
             specification_solvent = 0.99
             weight_pure_component = 1000.0
@@ -1012,13 +1011,13 @@ class FlowsheetSimulationGraph:
             return npv, normed
 
         else:  # "literature"
-            # 10y horizon @ 8000 h/a, with config-read costs
+            # 10y horizon @ 8000 h/a, with env_config-read costs
             years = 10
             hr_per_year = 8000
 
-            unit_costs = getattr(self.config, "unit_costs_literature", {}) or {}
-            price_pure_component_per_kg = float(getattr(self.config, "lit_product_value_per_kg", 0.5))
-            solvent_cost_per_kg = getattr(self.config, "solvent_cost_per_component_kg", {}) or {}
+            unit_costs = getattr(self.env_config, "unit_costs_literature", {}) or {}
+            price_pure_component_per_kg = float(getattr(self.env_config, "lit_product_value_per_kg", 0.5))
+            solvent_cost_per_kg = getattr(self.env_config, "solvent_cost_per_component_kg", {}) or {}
             specification_pure = 0.99
             specification_solvent = 0.99
 
@@ -1057,7 +1056,7 @@ class FlowsheetSimulationGraph:
 
             # Units, capex/opex, solvent added
             for nid, ut, nd in _unit_nodes():
-                # capital cost (config-driven, static)
+                # capital cost (env_config-driven, static)
                 cap = float(unit_costs.get(ut, 0.0))
                 inp_mol = _sum_inputs_to_node(nid)
                 inp_kg = np.sum(self._convert_mol_flow_to_kg(inp_mol, factor_mol=1e6))
@@ -1091,15 +1090,15 @@ class FlowsheetSimulationGraph:
                                 break
                             name = names[gidx]
                             factor = float(
-                                self.config.dict_pure_component_data[name].get("factor_heat_estimation_J_per_mol", 0.0))
+                                self.env_config.dict_pure_component_data[name].get("factor_heat_estimation_J_per_mol", 0.0))
                             heat_per_hr += 2.0 * factor * float(out0[j]) * 1e6  # “2x as in legacy”, Mmol->mol
                         # Convert heat proxy to “steam kg” via water factor, then € via a notional price if available
                         wfac = float(
-                            self.config.dict_pure_component_data["water"].get("factor_heat_estimation_J_per_mol", 0.0))
+                            self.env_config.dict_pure_component_data["water"].get("factor_heat_estimation_J_per_mol", 0.0))
                         if wfac > 0:
                             mol_water_per_hr = heat_per_hr / wfac
                             kg_water_per_hr = mol_water_per_hr * float(
-                                self.config.dict_pure_component_data["water"]["M"]) / 1000.0
+                                self.env_config.dict_pure_component_data["water"]["M"]) / 1000.0
                             steam_price = float(unit_costs.get("steam_cost_per_kg", 0.0))
                             cost_units_total += steam_price * kg_water_per_hr * years * hr_per_year
 
@@ -1148,7 +1147,7 @@ class FlowsheetSimulationGraph:
     def _convert_mol_flow_to_kg(self, flowrates_mol, factor_mol):
         """
         Convert a flowsheet-order molar flow vector to kg/hr, using the *current* indices
-        and pure component molar masses from config.dict_pure_component_data.
+        and pure component molar masses from env_config.dict_pure_component_data.
 
         - flowrates_mol: array in flowsheet order (length max_number_of_components)
         - factor_mol: scale (legacy used 1e6 for Mmol/hr)
@@ -1159,8 +1158,8 @@ class FlowsheetSimulationGraph:
         for j, gidx in enumerate(self.current_indices):
             if j >= len(flowrates_mol):
                 break
-            name = self.config.phase_eq_generator.names_components[gidx]
-            M_g_per_mol = float(self.config.dict_pure_component_data[name]["M"])
+            name = self.env_config.phase_eq_generator.names_components[gidx]
+            M_g_per_mol = float(self.env_config.dict_pure_component_data[name]["M"])
             kg[j] = M_g_per_mol * flowrates_mol[j] * factor_mol / 1000.0  # g/mol * mol/hr -> kg/hr
 
         return kg
@@ -1188,13 +1187,13 @@ class FlowsheetSimulationGraph:
         [Tc0, Pc0, ω0, Tc1, Pc1, ω1, Tc2, Pc2, ω2, ...] up to max_number_of_components*3.
         Zeros for missing slots.
         """
-        maxC = self.config.max_number_of_components
+        maxC = self.env_config.max_number_of_components
         out = np.zeros(3 * maxC, dtype=float)
 
-        names = self.config.phase_eq_generator.names_components
+        names = self.env_config.phase_eq_generator.names_components
         for slot, gidx in enumerate(indices[:maxC]):
             name = names[gidx]
-            crit = self.config.dict_pure_component_data[name]["critical_data"]  # shape (3,)
+            crit = self.env_config.dict_pure_component_data[name]["critical_data"]  # shape (3,)
             start = 3 * slot
             out[start:start + 3] = crit
         return out
@@ -1206,11 +1205,11 @@ class FlowsheetSimulationGraph:
 
         Order: for present i<j in slot-order, append [γ_ij, γ_ji].
         """
-        maxC = self.config.max_number_of_components
+        maxC = self.env_config.max_number_of_components
         max_len = maxC * (maxC - 1)  # 2*C(maxC,2)
 
-        names = self.config.phase_eq_generator.names_components
-        T = self.config.phase_eq_generator.subsystems_temperatures[
+        names = self.env_config.phase_eq_generator.names_components
+        T = self.env_config.phase_eq_generator.subsystems_temperatures[
             self.feed_stream_information["feed_situation_index"]
         ]
 
@@ -1221,7 +1220,7 @@ class FlowsheetSimulationGraph:
             for j in range(i + 1, n_present):
                 n1 = names[indices[i]]
                 n2 = names[indices[j]]
-                gij, gji = self.config.phase_eq_generator.compute_inf_dilution_act_coeffs(n1, n2, T)
+                gij, gji = self.env_config.phase_eq_generator.compute_inf_dilution_act_coeffs(n1, n2, T)
                 gammas.extend([gij, gji])
 
         gammas = np.asarray(gammas, dtype=float)

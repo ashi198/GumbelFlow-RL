@@ -17,11 +17,16 @@ class DistillationColumn(nn.Module):
         self.latent_dim = self.config.latent_dim
         self.logit_linear = nn.Linear(in_features = self.latent_dim, out_features = 1)
         self.df_categorical = nn.Linear(in_features = self.latent_dim, out_features = 100)
-        self.df_and_type_embed = nn.Embedding(num_embeddings = 1, embedding_dim=self.latent_dim)
+        self.df_and_type_embed = nn.Linear(in_features = 1, out_features=self.latent_dim)
 
 
-    def embed(self, df: torch.FloatTensor):
-        return self.df_and_type_embed(df)
+    def embed(self, node_data: dict):
+        df = node_data["params"]["df"]
+
+        # convert into a tensor
+        df_tensor = torch.tensor([float(df)], dtype=torch.float32, device= self.config.training_device)
+
+        return self.df_and_type_embed(df_tensor)
         
     def predict(self, x: torch.FloatTensor):
 
@@ -54,11 +59,10 @@ class Decanter(nn.Module):
             }
     
 class Mixer(nn.Module):
-    def __init__(self, config, mixer_mask):
-        super(Decanter, self).__init__()
+    def __init__(self, config):
+        super(Mixer, self).__init__()
         self.name = "mixer"
         self.config = config 
-        self.mixer_mask = mixer_mask
         self.latent_dim = self.config.latent_dim
         self.query_linear_proj = nn.Linear(self.latent_dim, self.latent_dim)
         self.key_linear_proj = nn.Linear(self.latent_dim, self.latent_dim)
@@ -71,7 +75,7 @@ class Mixer(nn.Module):
             torch.tensor([0] * batch_size, dtype = torch.long) #(batch_size, latent_dim)
         )
         
-    def predict(self, x: torch.FloatTensor):
+    def predict(self, x: torch.FloatTensor, mixer_mask = None):
 
         # x is the embedding of shape (batch_size, num_nodes, latent_dim)
         query = self.query_linear_proj(x)
@@ -80,7 +84,12 @@ class Mixer(nn.Module):
         scores = self.scale_constant * torch.tanh(scores)
 
         # mask out not allowed nodes (e.g self connections, system source nodes)
-        scores = scores.masked_fill(self.mixer_mask == 0, float('-inf')) 
+        # apply mask only if it exists
+        if mixer_mask is not None:
+            mixer_mask = torch.as_tensor(
+            mixer_mask, device=scores.device, dtype=torch.bool)
+            
+            scores = scores.masked_fill(~mixer_mask, float('-inf')) 
 
         return {
         "picked_logit": self.logit_linear(x), # (batch_size, num_nodes, 1)
@@ -96,10 +105,12 @@ class Split(nn.Module):
         self.latent_dim = self.config.latent_dim
         self.logit_linear = nn.Linear(in_features = self.latent_dim, out_features = 1)
         self.split_ratio_categorical = nn.Linear(in_features = self.latent_dim, out_features = 100)
-        self.split_ratio_and_type_embed = nn.Embedding(num_embeddings= 1, embedding_dim= self.latent_dim)
+        self.split_ratio_and_type_embed = nn.Linear(in_features= 1, out_features= self.latent_dim)
 
-    def embed(self, sr: torch.FloatTensor):
-        return self.split_ratio_and_type_embed(sr)
+    def embed(self, node_data: dict):
+        sr = node_data["params"]["split_ratio"]
+        sr_tensor = torch.tensor([float(sr)], dtype=torch.float32, device= self.config.training_device)
+        return self.split_ratio_and_type_embed(sr_tensor)
         
     def predict(self, x: torch.FloatTensor):
 
@@ -111,20 +122,20 @@ class Split(nn.Module):
             }
     
 class Recycler(nn.Module):
-    def __init__(self, config, recycler_mask: torch.Tensor):
+    def __init__(self, config):
         super(Recycler, self).__init__()
         self.name = "recycler"
         self.config = config 
-        self.recycler_mask = recycler_mask 
         self.latent_dim = self.config.latent_dim 
         self.logit_linear = nn.Linear(in_features = self.latent_dim, out_features = 1)
         self.query_linear_proj = nn.Linear(self.latent_dim, self.latent_dim)
         self.key_linear_proj = nn.Linear(self.latent_dim, self.latent_dim)
         self.scale_constant = 10
 
-    def predict(self, x: torch.FloatTensor):
+    def predict(self, x: torch.FloatTensor, recycler_mask = None):
 
         # x is the embedding of shape (batch_size, num_nodes, latent_dim)
+        # recycler_mask: (B, N, N) 
 
         query = self.query_linear_proj(x)
         key = self.key_linear_proj(x)
@@ -132,7 +143,15 @@ class Recycler(nn.Module):
         scores = self.scale_constant * torch.tanh(scores)
 
         # mask out not allowed nodes (e.g self connections, system source nodes)
-        scores = scores.masked_fill(self.recycler_mask == 0, float('-inf')) 
+        if recycler_mask is not None:
+            
+            '''recycler_mask = torch.as_tensor(
+            recycler_mask,
+            device=scores.device,
+            dtype=torch.bool
+        )'''
+            
+            scores = scores.masked_fill(~recycler_mask == 0, float('-inf')) 
 
         return {
         "picked_logit": self.logit_linear(x), # (batch_size, num_nodes, 1)
@@ -140,17 +159,18 @@ class Recycler(nn.Module):
         } 
     
 class AddSolvent(nn.Module):
-    def __init__(self, config):
+    def __init__(self, gen_config, env_config):
         super(AddSolvent, self).__init__()
         self.name = "add_solvent"
-        self.config = config 
-        self.latent_dim = config.latent_dim 
+        self.gen_config = gen_config
+        self.env_config = env_config
+        self.latent_dim = gen_config.latent_dim 
 
         self.logit_linear = nn.Linear(in_features = self.latent_dim, out_features = 1)
-        self.type_embed = nn.Embedding( num_embeddings= 4, embedding_dim = self.latent_dim)
+        self.type_embed = nn.Embedding(num_embeddings= 3, embedding_dim = self.latent_dim)
 
         self.prediction_mlp = nn.Sequential(
-            nn.Linear(self.latent_dim + 4, 2 * self.latent_dim),
+            nn.Linear(self.latent_dim + 3, 2 * self.latent_dim),
             nn.SiLU(),
             nn.Linear(2 * self.latent_dim, 1 + 100) # for logit and amount discretized to 100 categories
         )
@@ -158,10 +178,14 @@ class AddSolvent(nn.Module):
     def embed(self, x):
         return self.type_embed(x)
 
-    def predict(self, x: torch.FloatTensor, components: torch.FloatTensor):
+    def predict(self, x: torch.FloatTensor):
 
         # x is the embedding of shape (batch_size, num_nodes, latent_dim)
         # components is of shape (num_possible_components, 4)
+
+        # all possible components 
+        components = self.env_config.components_tensor 
+
         batch_size, num_nodes, _ = x.size()
         num_components, _ = components.size()
 
@@ -174,53 +198,99 @@ class AddSolvent(nn.Module):
 
         return {
         "picked_logit": self.logit_linear(x), # (batch_size, num_nodes, 1)
-        "component_logit": mlp_out[:, :, :, 0].sequeeze(-1), # (batch_size. num_nodes, num_components) <- distribution over which component to add 
+        "component_logit": mlp_out[:, :, :, 0].squeeze(-1), # (batch_size. num_nodes, num_components) <- distribution over which component to add 
         "component_amount": mlp_out[:, :, :, 1:] # (batch_size, num_nodes, num_components, 100)
         } 
     
 class FlowExpert(nn.Module):
-    def __init__(self, config):
+    def __init__(self, gen_config, env_config):
         super(FlowExpert, self).__init__()
-        self.config = config 
-        self.flow_latent_dim = self.config.flow_latent_dim
-        self.num_trf_blocks = self.config.num_trf_flow_blocks
+        self.gen_config = gen_config 
+        self.env_config = env_config
+        self.flow_latent_dim = gen_config.flow_latent_dim
+        self.num_trf_blocks = gen_config.num_trf_flow_blocks
 
-        self.flow_trf_encoder = nn.ModuleList([])
-        for _ in range(self.num_trf_blocks):
-            block = CoreTransformerEncoder(d_model = self.flow_latent_dim, nhead = 4, dropout = self.config.dropout,
-                                          )
-            self.flow_trf_encoder.append(block)
+        self.blocks = nn.ModuleList([
+            CoreTransformerEncoder(d_model= self.flow_latent_dim, nhead=4, dropout=self.gen_config.dropout)
+            for _ in range(self.gen_config.num_trf_flow_blocks)
+        ])
 
-        self.component_linear = nn.Linear(in_features = 3, out_features = self.flow_latent_dim)
-        self.edge_linear = nn.Linear(in_features = 1, out_features = self.flow_latent_dim)
-        self.flow_latent_upscale = nn.Linear (in_features = self.flow_latent_dim, out_features = self.config.latent_dim)
+        self.component_linear = nn.Embedding(num_embeddings=env_config.num_components, embedding_dim = self.flow_latent_dim)
+        self.edge_linear = nn.Linear(in_features = 1, out_features= self.flow_latent_dim)
+        self.amount_linear = nn.Linear(1, self.flow_latent_dim)
 
-    def forward(self, component_params, interaction_params, amount):
+        self.flow_latent_upscale = nn.Linear(self.flow_latent_dim, self.gen_config.latent_dim)
 
-            # component_params: (batch_size, num_components, 3)
-            # interaction_params: (batch_size, num_components, num_components, 1)
-            # amount: (batch_size, num_components, 1)
-        
-        nodes = self.component_linear(component_params) * amount # (batch_size, num_components, flow_latent_dim)
+    def flat_gamma_to_matrix(self, system_gamma_inf, num_components):
+        flat = torch.tensor(system_gamma_inf, dtype=torch.float32)
+        gamma_local = torch.zeros(num_components, num_components)
+        idx = 0
+        for i in range(num_components):
+            for j in range(i + 1, num_components):
+                if i != j:
+                    gamma_local[i, j] = flat[idx]
+                    gamma_local[j, i] = flat[idx + 1]
+                    idx += 2
+        return gamma_local
+
+    def forward(self, x):
+
+        # component_params: (batch_size, num_components, 3)
+        # interaction_params: (batch_size, num_components, num_components, 1)
+        # amount: (batch_size, num_components, 1)
+
+        component_ids = torch.tensor([x.get("system_indices")], dtype=torch.long)
+        gamma = self.flat_gamma_to_matrix(x.get("system_gammas_inf"), component_ids.shape[1])
+        interaction_params = gamma.unsqueeze(0).unsqueeze(-1)
+        amount = torch.tensor(x.get("output_flows")['out0'][0:component_ids.shape[1]], dtype=torch.float32).unsqueeze(-1)
+
+        nodes = self.component_linear(component_ids) + self.amount_linear(amount) # (batch_size, num_components, flow_latent_dim)
         edges = self.edge_linear(interaction_params) # (batch_size, num_components, num_components, flow_latent_dim)
-        transformed_nodes = self.flow_trf_encoder(nodes, edges) # (batch_size, num_components, num_components, flow_latent_dim)
+        
+        for block in self.blocks:
+            transformed_nodes = block(nodes, edges) # (batch_size, num_components, num_components, flow_latent_dim)
+        
         flow_embedding = transformed_nodes.mean(dim=1) # (batch_size, flow_latent_dim)
         return self.flow_latent_upscale(flow_embedding) # (batch_size, latent_dim)
 
 class EdgeFlowExpert(nn.Module):
-    
     def __init__(self, config, flow_expert: FlowExpert):
         super(EdgeFlowExpert, self).__init__()
         self.flow_expert = flow_expert 
+        self.config = config
         self.latent_dim = self.config.latent_dim
+        
+        self.is_recycle_emb = nn.Embedding(num_embeddings = 2, embedding_dim = self.latent_dim) # 0 for no, 1 for yes
 
         # no edge connection embedding 
-        self.is_recycle_emb = nn.Embedding(num_embeddings= 2, embedding_dim = self.latent_dim) # 0 for no, 1 for yes
+        self.no_edge_emb = nn.Embedding(num_embeddings = 2, embedding_dim = self.latent_dim) # 0 for no, 1 for yes
 
-    def forward(self, x):
-        latent_flow = self.flow_expert(x) # check how to make this as component_params, interactions_params etc
-        recycle_emb = self.is_recycle_emb()
-        combine_edge_embed = latent_flow + recycle_emb 
+    def forward(self, edge_exists: bool, is_recycle: bool, carries_flow: bool, edge=None):
+
+        if not edge_exists: 
+            edge_idx = torch.tensor(0, dtype=torch.long, device=self.config.training_device)
+            return self.no_edge_emb(edge_idx)
+
+        # if an edge exists (in cases of a single open stream or virtual node)
+        edge_idx = torch.tensor(1, dtype=torch.long, device=self.config.training_device)
+
+        # if its a recycle 
+        recycle_idx = torch.tensor(
+                    1 if is_recycle else 0,
+                    dtype=torch.long,
+                    device=self.config.training_device
+                )
+
+        edge_emb = self.no_edge_emb(edge_idx)
+        recycle_emb = self.is_recycle_emb(recycle_idx)
+
+        if not carries_flow:
+            return edge_emb + recycle_emb
+        
+         # stream edge: has mixture
+        latent_flow = self.flow_expert(edge) # check how to make this as component_params, interactions_params etc
+
+        combine_edge_embed = latent_flow + recycle_emb + edge_emb
 
         return combine_edge_embed
     
@@ -229,6 +299,7 @@ class OpenStreamExpert(nn.Module):
     def __init__(self, config, flow_expert: FlowExpert):
         super(OpenStreamExpert, self).__init__()
         self.flow_expert = flow_expert 
+        self.config = config
         self.latent_dim = self.config.latent_dim
         self.linear_transform_open_stream = nn.Linear(self.latent_dim, self.latent_dim)
 

@@ -44,7 +44,7 @@ class CoreTransformerEncoder(nn.Module):
         #Pre norm attention block
         nodes = self.layer_norm(nodes)
         z = self.attn(nodes, edges)
-        nodes = nodes + z  #Do residuals 
+        nodes = nodes + z[0]  #Do residuals 
 
         #Feedforward network block
         nodes = self.layer_norm(nodes)
@@ -81,15 +81,13 @@ class GeneralizedAttention(nn.Module):
         self.head_dim = d_model // nhead
         self.clip_value = clip_value
         assert d_model % nhead == 0, "d_model must be divisible by num of heads"
-
-    def linear_projections(self, d_model):
-        return nn.Linear(d_model, d_model)
+        self.linear_proj = nn.Linear(self.d_model, self.d_model)
     
     def MultiHeadNodeProjections(self, nodes: torch.Tensor):
         
-        queries = self.linear_projections(nodes) #(b, n, h, d)
-        keys = self.linear_projections(nodes)  #(b, n, h, d)
-        values = self.linear_projections(nodes) #(b, n, h, d)
+        queries = self.linear_proj(nodes) #(b, n, d)
+        keys = self.linear_proj(nodes)  #(b, n, d)
+        values = self.linear_proj(nodes) #(b, n, d)
         batch_size, num_nodes = nodes.size(0), nodes.size(1) # check this 
 
         queries = queries.view(batch_size, num_nodes, self.nhead, self.head_dim) # For splitting matrices between heads. 
@@ -100,8 +98,8 @@ class GeneralizedAttention(nn.Module):
 
     def MultiHeadEdgeProjections(self, edges: torch.Tensor, batch_size:int, num_nodes: int):
         
-        queries = self.linear_projections(edges) #(b, n, n, h, d)
-        keys = self.linear_projections(edges) #(b, n, n, h, d)
+        queries = self.linear_proj(edges) #(b, n, n, d)
+        keys = self.linear_proj(edges) #(b, n, n, d)
 
         queries = queries.view(batch_size, num_nodes, num_nodes, self.nhead, self.head_dim)
         keys = keys.view(batch_size, num_nodes, num_nodes, self.nhead, self.head_dim)
@@ -125,9 +123,9 @@ class GeneralizedAttention(nn.Module):
             scores = self.clip_value * torch.tanh(scores)
 
         # Apply mask, if provided
-        if mask is not None:
-            mask = mask.unsqueeze(1)  # add a dimension so that mask is from (b, n, n) to (b, h, n, n)
-            scores = scores.masked_fill(mask == 0, float('-inf')) # check if mask value should be 0 or 1 
+        if self.mask is not None:
+            self.mask = self.mask.unsqueeze(1)  # add a dimension so that mask is from (b, n, n) to (b, h, n, n)
+            scores = scores.masked_fill(self.mask == 0, float('-inf')) # check if mask value should be 0 or 1 
 
         # Compute the attention weights
         attn_weights = F.softmax(scores, dim=-1) # softmax over the last dimension (over keys)
@@ -138,7 +136,7 @@ class GeneralizedAttention(nn.Module):
         # Combine heads and project output
         output = output.transpose(1, 2).contiguous() #(b,h,n,d) -> (b,n,h, d)
         output = output.view(batch_size, num_nodes, self.d_model)
-        output = self.linear_projections(output)
+        output = self.linear_proj(output)
 
         return output, attn_weights
 

@@ -8,7 +8,6 @@ from core.abstract import Instance
 import core.stochastic_beam_search as sbs
 from typing import List, Tuple, Any, Optional
 from core.incremental_sbs import IncrementalSBS
-from config import GeneralConfig, EnvConfig
 
 os.environ["RAY_DEDUP_LOGS"] = "0"
 
@@ -36,10 +35,10 @@ class JobPool:
     
 
 class GumbeldoreDataset:
-    def __init__(self):
-        self.gen_config = GeneralConfig
-        self.env_config = EnvConfig 
-        self.gumbeldore_config = self.gen_config.gumbeldore_config
+    def __init__(self, gen_config, env_config):
+        self.gen_config = gen_config
+        self.gumbeldore_config = gen_config.gumbeldore_config
+        self.env_config = env_config
         self.devices_for_workers: List[str] = self.gumbeldore_config["devices_for_workers"]
 
     def generate_dataset(self, network_weights: dict, best_objective: Optional[float] = None, memory_aggressive: bool = False):
@@ -55,8 +54,8 @@ class GumbeldoreDataset:
         batch_size_gpu, batch_size_cpu = (self.gumbeldore_config["batch_size_per_worker"],
                                             self.gumbeldore_config["batch_size_per_cpu_worker"])
 
-        random_instance = EnvConfig.create_random_problem_instance()
-        problem_instances = FlowsheetDesign.design_flowsheets(random_instance)
+        random_instance = self.env_config.create_random_problem_instance()
+        problem_instances = FlowsheetDesign.design_flowsheets(random_instance, self.gen_config, self.env_config)
 
         job_pool = JobPool.remote(copy.deepcopy(problem_instances))
         results = [None] * len(problem_instances)
@@ -72,7 +71,7 @@ class GumbeldoreDataset:
         future_tasks = [
             #async_sbs_worker.remote(
             async_sbs_worker(
-                self.gen_config, job_pool, network_weights, device,
+                self.gen_config, self.env_config, job_pool, network_weights, device,
                 batch_size_gpu if device != "cpu" else batch_size_cpu,
                 cpu_cores[i], best_objective, memory_aggressive
             )
@@ -160,7 +159,7 @@ class GumbeldoreDataset:
 
 
 #@ray.remote(max_calls=1)
-def async_sbs_worker(config, job_pool: JobPool, network_weights: dict,
+def async_sbs_worker(gen_config, env_config, job_pool: JobPool, network_weights: dict,
                      device: str, batch_size: int,
                      cpu_core: Optional[int] = None,
                      best_objective: Optional[float] = None,
@@ -184,14 +183,12 @@ def async_sbs_worker(config, job_pool: JobPool, network_weights: dict,
 
     with torch.no_grad():
 
-        gen_config = GeneralConfig
-
         if gen_config.CUDA_VISIBLE_DEVICES:
             # override ray's limiting of GPUs
             os.environ["CUDA_VISIBLE_DEVICES"] = gen_config.CUDA_VISIBLE_DEVICES
 
         device = torch.device(device)
-        network = FlowsheetNetwork(config, device)
+        network = FlowsheetNetwork(gen_config, env_config, device)
         network.load_state_dict(network_weights)
         network.to(network.device)
         network.eval()
@@ -216,7 +213,7 @@ def async_sbs_worker(config, job_pool: JobPool, network_weights: dict,
                     deterministic=True
                 )
             else:
-                inc_sbs = IncrementalSBS(config, root_nodes, child_log_probability_fn, child_transition_fn,
+                inc_sbs = IncrementalSBS(root_nodes, child_log_probability_fn, child_transition_fn,
                                          leaf_evaluation_fn=FlowsheetDesign.to_max_evaluation_fn,
                                          batch_leaf_evaluation_fn=batch_leaf_evaluation_fn,
                                          memory_aggressive=False)
