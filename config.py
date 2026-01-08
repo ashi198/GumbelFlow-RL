@@ -88,7 +88,7 @@ class EnvConfig:
 
         # ----- Core dimensional settings -----
         # limit for full actions (=placing unit) per feed stream
-        self.max_steps_for_flowsheet_synthesis = 10
+        self.max_steps_for_flowsheet_synthesis = 2
 
         # maximum number of components present simultaneously in a flowsheet
         self.max_number_of_components = 3
@@ -184,6 +184,9 @@ class EnvConfig:
             "add_solvent":         {"num": 1,"output_streams": 1, "cont_range": [0.01, 10]},
         }
 
+        self.outlet_to_idx = {"out0": 0, "out1": 1}
+        self.max_outlets = 2
+
         self.distillation_column = units.distillation_column()
 
         # Stable index -> unit type mapping (flat catalog)
@@ -243,7 +246,7 @@ class EnvConfig:
         self.add_solvent_comp_map = {
             "acetone": self.acetone_conc_map,
             "benzene": self.benzene_conc_map, 
-            "butanol": self.butanol_conc_map, 
+            "n-butanol": self.butanol_conc_map, 
             "toluene": self.tol_conc_map, 
             "water": self.water_conc_map
                 } 

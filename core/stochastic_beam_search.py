@@ -188,7 +188,7 @@ def stochastic_beam_search(
 
                 # MOLECULE: Check if we can terminate (and haven't so before) and the molecule is large enough.
                 # If so, register it.
-                if keep_intermediate and type(node_state) is tuple and node_state[1].is_terminable() and 0 in good_indices and node_state[1].total_units_placed >= 10:
+                if keep_intermediate and type(node_state) is tuple and node_state[1].is_terminable() and 0 in good_indices and node_state[1].total_units_placed >= 5:
                     terminable_log_probs.append(log_probabilities[0])
                     terminable_gumbels.append(gumbels[0])
                     terminable_states.append(node_state)

@@ -17,7 +17,7 @@ class DistillationColumn(nn.Module):
         self.latent_dim = self.config.latent_dim
         self.logit_linear = nn.Linear(in_features = self.latent_dim, out_features = 1)
         self.df_categorical = nn.Linear(in_features = self.latent_dim, out_features = 100)
-        self.df_and_type_embed = nn.Linear(in_features = 1, out_features=self.latent_dim)
+        self.df_and_type_embed = nn.Linear(in_features = 1, out_features=self.latent_dim, bias = True)
 
 
     def embed(self, node_data: dict):
@@ -69,6 +69,7 @@ class Mixer(nn.Module):
         self.scale_constant = 10
         self.logit_linear = nn.Linear(in_features = self.latent_dim, out_features = 1)
         self.type_embed = nn.Embedding(num_embeddings= 1, embedding_dim= self.latent_dim)
+        self.choose_destination_outlet = nn.Linear(in_features = self.latent_dim, out_features = 2) #max_num of outlets allowed but idk if this is right 
 
     def embed(self, batch_size: int):
         return self.type_embed(
@@ -84,16 +85,16 @@ class Mixer(nn.Module):
         scores = self.scale_constant * torch.tanh(scores)
 
         # mask out not allowed nodes (e.g self connections, system source nodes)
-        # apply mask only if it exists
+        # Apply mask only if it exists
+
         if mixer_mask is not None:
-            mixer_mask = torch.as_tensor(
-            mixer_mask, device=scores.device, dtype=torch.bool)
-            
-            scores = scores.masked_fill(~mixer_mask, float('-inf')) 
+            mixer_mask = torch.as_tensor(mixer_mask, device=scores.device, dtype=torch.bool)
+            scores = scores.masked_fill(~mixer_mask, -1e9) 
 
         return {
         "picked_logit": self.logit_linear(x), # (batch_size, num_nodes, 1)
-        "target_scores": scores # (batch_size, num_nodes, num_nodes)
+        "target_scores": scores, # (batch_size, num_nodes, num_nodes)
+        "destinate_node_outlets": self.choose_destination_outlet(x) # (batch_size, num_nodes, max_potential_outlets)
         } 
     
 
@@ -105,7 +106,7 @@ class Split(nn.Module):
         self.latent_dim = self.config.latent_dim
         self.logit_linear = nn.Linear(in_features = self.latent_dim, out_features = 1)
         self.split_ratio_categorical = nn.Linear(in_features = self.latent_dim, out_features = 100)
-        self.split_ratio_and_type_embed = nn.Linear(in_features= 1, out_features= self.latent_dim)
+        self.split_ratio_and_type_embed = nn.Linear(in_features= 1, out_features= self.latent_dim, bias = True)
 
     def embed(self, node_data: dict):
         sr = node_data["params"]["split_ratio"]
@@ -144,14 +145,8 @@ class Recycler(nn.Module):
 
         # mask out not allowed nodes (e.g self connections, system source nodes)
         if recycler_mask is not None:
-            
-            '''recycler_mask = torch.as_tensor(
-            recycler_mask,
-            device=scores.device,
-            dtype=torch.bool
-        )'''
-            
-            scores = scores.masked_fill(~recycler_mask == 0, float('-inf')) 
+            recycler_mask = torch.as_tensor(recycler_mask, device=scores.device, dtype=torch.bool)
+            scores = scores.masked_fill(~recycler_mask, -1e9) 
 
         return {
         "picked_logit": self.logit_linear(x), # (batch_size, num_nodes, 1)
@@ -167,7 +162,7 @@ class AddSolvent(nn.Module):
         self.latent_dim = gen_config.latent_dim 
 
         self.logit_linear = nn.Linear(in_features = self.latent_dim, out_features = 1)
-        self.type_embed = nn.Embedding(num_embeddings= 3, embedding_dim = self.latent_dim)
+        self.type_embed = nn.Linear(in_features= 3, out_features = self.latent_dim, bias= True)
 
         self.prediction_mlp = nn.Sequential(
             nn.Linear(self.latent_dim + 3, 2 * self.latent_dim),
@@ -176,7 +171,9 @@ class AddSolvent(nn.Module):
         )
 
     def embed(self, x):
-        return self.type_embed(x)
+        component_tuple = x["output_flows"]["out0"]
+        component_tuple_tensor = torch.from_numpy(component_tuple).to(dtype = torch.float32, device = self.gen_config.training_device)
+        return self.type_embed(component_tuple_tensor)
 
     def predict(self, x: torch.FloatTensor):
 
@@ -296,15 +293,32 @@ class EdgeFlowExpert(nn.Module):
     
 
 class OpenStreamExpert(nn.Module):
-    def __init__(self, config, flow_expert: FlowExpert):
+    def __init__(self, gen_config, env_config, flow_expert: FlowExpert):
         super(OpenStreamExpert, self).__init__()
         self.flow_expert = flow_expert 
-        self.config = config
-        self.latent_dim = self.config.latent_dim
+        self.gen_config = gen_config
+        self.env_config = env_config
+        self.latent_dim = self.gen_config.latent_dim
         self.linear_transform_open_stream = nn.Linear(self.latent_dim, self.latent_dim)
+        self.logit_linear = nn.Linear(in_features = self.latent_dim, out_features = 1, bias=True)
+        self.outlet_embedding = nn.Embedding(num_embeddings=self.env_config.max_outlets, embedding_dim=self.latent_dim)
 
     def forward(self, x):
         latent_flow = self.flow_expert(x) # check how to make this as component_params, interactions_params etc
         open_stream_embed = self.linear_transform_open_stream(latent_flow)
         
         return open_stream_embed
+
+    def predict(self, x: torch.FloatTensor):
+        
+        # open_stream_embeddings: (B, K, latent_dim)
+        logits = self.logit_linear(x)  # (B, K, 1)
+        
+        return logits
+
+    def outlet_emb(self, x):
+        
+        outlet_emb = self.outlet_embedding(x)
+        
+        return outlet_emb
+

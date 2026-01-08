@@ -19,15 +19,14 @@ class CoreTransformerEncoder(nn.Module):
 
     """
 
-    def __init__(self, d_model, nhead, dropout, mask= None, clip_value = 10):
+    def __init__(self, d_model, nhead, dropout, clip_value = 10):
         super().__init__()
         self.d_model = d_model
         self.nhead = nhead
         self.dropout = dropout 
-        self.mask = mask 
         self.clip_value = clip_value 
         self.layer_norm = nn.LayerNorm(d_model)
-        self.attn = GeneralizedAttention(d_model, nhead, mask, clip_value)
+        self.attn = GeneralizedAttention(d_model, nhead, clip_value)
         self.head_dim = d_model // nhead
         assert d_model % nhead == 0, "latent_dim must be divisible by num of heads"
 
@@ -39,11 +38,11 @@ class CoreTransformerEncoder(nn.Module):
             nn.Dropout(dropout)
         )
 
-    def forward(self, nodes: torch.Tensor, edges: torch.Tensor):
+    def forward(self, nodes: torch.Tensor, edges: torch.Tensor, mask = None):
         
         #Pre norm attention block
         nodes = self.layer_norm(nodes)
-        z = self.attn(nodes, edges)
+        z = self.attn(nodes, edges, mask)
         nodes = nodes + z[0]  #Do residuals 
 
         #Feedforward network block
@@ -73,11 +72,10 @@ class GeneralizedAttention(nn.Module):
 
     """
 
-    def __init__(self, d_model, nhead, mask=None, clip_value = 10):
+    def __init__(self, d_model, nhead, clip_value = 10):
         super().__init__()
         self.d_model = d_model
         self.nhead = nhead
-        self.mask = mask
         self.head_dim = d_model // nhead
         self.clip_value = clip_value
         assert d_model % nhead == 0, "d_model must be divisible by num of heads"
@@ -106,7 +104,7 @@ class GeneralizedAttention(nn.Module):
 
         return queries, keys 
 
-    def forward(self, nodes: torch.Tensor, edges: torch.Tensor):
+    def forward(self, nodes: torch.Tensor, edges: torch.Tensor, mask= None):
 
         batch_size, num_nodes = nodes.size(0), nodes.size(1)
                 
@@ -123,9 +121,9 @@ class GeneralizedAttention(nn.Module):
             scores = self.clip_value * torch.tanh(scores)
 
         # Apply mask, if provided
-        if self.mask is not None:
-            self.mask = self.mask.unsqueeze(1)  # add a dimension so that mask is from (b, n, n) to (b, h, n, n)
-            scores = scores.masked_fill(self.mask == 0, float('-inf')) # check if mask value should be 0 or 1 
+        if mask is not None:
+            mask = mask.unsqueeze(1)  # add a dimension so that mask is from (b, n, n) to (b, h, n, n)
+            scores = scores + mask # additive mask
 
         # Compute the attention weights
         attn_weights = F.softmax(scores, dim=-1) # softmax over the last dimension (over keys)

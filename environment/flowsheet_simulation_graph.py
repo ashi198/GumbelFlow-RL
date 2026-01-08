@@ -708,7 +708,7 @@ class FlowsheetSimulationGraph:
                     opens.append((nid, lbl))
         return opens
 
-    def get_units_with_single_input(self, exclude: Optional[int] = None) -> list[int]:
+    def get_units_with_single_input(self, exclude: Optional[int] = None) -> list:
         """
         Return units that currently already have a certain number of inputs (currently 3 (more should be impossible),
         excluding feeds and optionally excluding a particular node_id.
