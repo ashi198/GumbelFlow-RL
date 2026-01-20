@@ -1,5 +1,4 @@
 # environment_actions_graph.py
-# how to implement history list here 
 
 from __future__ import annotations
 from typing import Any, Dict, List, Optional, Tuple
@@ -101,11 +100,11 @@ class FlowsheetDesign:
 
         # initial simulate to populate open streams/NPV
         self.sim.simulate()
+        self.objective = None        
         self.current_state = self.get_current_state()
         self.get_feasible_actions()
 
     def get_current_state(self) -> Dict[str, Any]:
-        
         state = {
             "current_level": self.level,
             "open_streams": self._enumerate_open_streams(),
@@ -141,17 +140,17 @@ class FlowsheetDesign:
         """
         if self.level == 0:
             open_streams = self._enumerate_open_streams()
-            mask = np.ones(len(open_streams) + 1, dtype=int) #check if this is valid 
+            mask = np.zeros(len(open_streams) + 1, dtype=int) #check if this is valid 
             
             # masking condition for lvl 0 (terminate)
-            if self.finished_design == True:   
-                mask[1:len(open_streams)] = 0
+            if self.current_state['completed_design'] or self.total_units_placed >= getattr(self.env_config, "max_total_units", 9999) or self._all_units_at_max_capacity():   
+                mask[0] = 1
             else:
-                mask[0] = 0  #index 0 for termimate 
+                mask[1:] = 1 #index 0 for termimate 
 
             # enable all available stream slots (everything cis available)
             self.current_action_mask = mask
-            self.current_state["current_action_mask"] = self.current_action_mask 
+            #self.current_state["current_action_mask"] = self.current_action_mask 
             return mask   
 
         # select units now 
@@ -207,16 +206,15 @@ class FlowsheetDesign:
                         params_mask[idx] = 1 
 
             elif chosen_unit_name == "mixer":
+                src_node, _ = self.current_state["chosen_open_stream"]
                 candidates = self._enumerate_open_streams_excluding(exclude = self.current_state["chosen_open_stream"])
                 node_ids = list(self.sim.graph.nodes)
                 id_to_idx = {nid: i for i, nid in enumerate(node_ids)}
-                source_node, _ = self.current_state["chosen_open_stream"]
                 params_mask = np.zeros(len(node_ids), dtype=int) # number of nodes present in the graph
                 for i, _ in candidates:
-                    if i != source_node:
+                    if i != src_node:
                         idx = id_to_idx[i]
                         params_mask[idx] = 1 
-            
             self.current_action_mask = params_mask
             return params_mask
 
@@ -227,13 +225,15 @@ class FlowsheetDesign:
                 self.current_action_mask = params_mask #now decide components for parameters
 
             if unit_name == "mixer":
+                src_node, _ = self.current_state["chosen_open_stream"]
                 candidates = self._enumerate_open_streams_excluding(exclude = self.current_state["chosen_open_stream"])
-                source_node, _ = self.current_state["chosen_open_stream"]
-                params_mask = np.zeros(len(candidates), dtype=int)
-                for i, _ in candidates:
-                    if i != source_node:
-                        params_mask[i] = 1
-
+                params_mask = np.zeros(self.env_config.max_outlets, dtype=int)
+                for i, name in candidates:
+                    if i != src_node and i == self.current_state['pending_params']['mixer']['index_node']:
+                        if name == 'out0':
+                            params_mask[0] = 1
+                        elif name == 'out1':
+                            params_mask[1] = 1
                 self.current_action_mask = params_mask # decide which outlet to select for available nodes
 
             return params_mask
@@ -267,9 +267,11 @@ class FlowsheetDesign:
 
         """
 
-        assert not self.finished_design, "Taking action on an already terminated design!"
+        assert not self.current_state['completed_design'], "Taking action on an already terminated design!"
+        
         '''assert self.current_action_mask[action_index] == 0, \
             f"Trying to take action {action_index} on level {self.level}, but it is set to infeasible"'''
+        
         if action_index >= len(self.current_action_mask):
             raise ValueError(f"Invalid action {action_index}, mask size {len(self.current_action_mask)}") 
         
@@ -282,11 +284,9 @@ class FlowsheetDesign:
 
             if self.level == 0:      
                 if action_index == 0:  # Check this later 
-                    self.finished_design = True 
+                    self.current_state['completed_design'] = True 
                     self.history.extend([action_index] + [self.SKIP_ACTION] * 3) # because terminate do not have lvl1, lvl 2, lvl 3 decisions, we assign "skip_action" as 901
-                    self.current_state["completed_design"] = True 
-                    self.current_state["npv_norm"] = (self.sim.current_net_present_value_normed or 0.0) 
-                    return True, (self.sim.current_net_present_value_normed or 0.0), True
+                    return True, self.objective, True
                 
                 # if not terminate index, then open_stream selected 
                 selected_stream = open_streams[action_index - 1], 
@@ -360,12 +360,12 @@ class FlowsheetDesign:
                     # immediate place (no continuous param, no second stream)
                     self.chosen_unit = (unit_idx, unit_name)
                     self.history.extend([action_index] + [self.SKIP_ACTION] * 2) 
-                    self.current_state['chosen_unit'] = self.chosen_unit
+                    self.current_state['chosen_unit'] = self.chosen_unit                  
                     done, reward, worked = self._complete_action_place_and_simulate()
-                    self.level = 0 #back to selecting a new stream or terminating 
-                    self.get_feasible_actions()
                     self.current_state["completed_design"] = done 
-                    self.current_state["npv_norm"] = reward 
+                    self.objective = reward 
+                    self.level = 0 
+                    self.get_feasible_actions()
                     return done, reward, worked
 
             elif self.level == 2:
@@ -378,11 +378,12 @@ class FlowsheetDesign:
                         self.pending_params["distillation_column"] = (action_index, self.DF_distillation)
                         self.current_state["pending_params"] = self.pending_params
                         self.history.extend([action_index] + [self.SKIP_ACTION]) 
-                        self.level = 0
-                        self.get_feasible_actions()
                         done, reward, worked = self._complete_action_place_and_simulate()
                         self.current_state["completed_design"] = done 
-                        self.current_state["npv_norm"] = reward 
+                        self.objective = reward 
+                        self.current_state['open_streams'] = self._enumerate_open_streams()
+                        self.level = 0
+                        self.get_feasible_actions()
                         return done, reward, worked
 
                 # for selecting split ratio 
@@ -394,11 +395,12 @@ class FlowsheetDesign:
                         self.pending_params["split"] = (action_index, self.split_ratio)
                         self.current_state["pending_params"] = self.pending_params
                         self.history.extend([action_index] + [self.SKIP_ACTION]) 
-                        self.level = 0
-                        self.get_feasible_actions()
                         done, reward, worked = self._complete_action_place_and_simulate()
                         self.current_state["completed_design"] = done 
-                        self.current_state["npv_norm"] = reward 
+                        self.objective = reward 
+                        self.current_state['open_streams'] = self._enumerate_open_streams()
+                        self.level = 0
+                        self.get_feasible_actions()
                         return done, reward, worked
                     
                 elif self._chosen_unit_name() == "add_solvent":
@@ -433,8 +435,8 @@ class FlowsheetDesign:
                         self.current_state["recycle_dest_unit"] = self.recycle_dest_unit
                         done, reward, worked = self._complete_action_place_and_simulate()
                         self.current_state["completed_design"] = done 
-                        self.current_state["npv_norm"] = reward
-                        self.level = 0 
+                        self.objective = reward
+                        self.level = 0
                         self.get_feasible_actions()
                         self.current_state['open_streams'] = self._enumerate_open_streams()
                         return done, reward, worked
@@ -444,12 +446,21 @@ class FlowsheetDesign:
                     candidates = self._enumerate_open_streams_excluding(exclude = self.current_state["chosen_open_stream"])
                     src_node, _ = self.current_state["chosen_open_stream"]
                     candidate_nodes = sorted({i for i, _ in candidates if i != src_node})
-                    if action_index in candidate_nodes:
-                        self.second_open_stream_dest_node = action_index 
+                    node_ids = list(self.sim.graph.nodes)
+                    id_to_idx = {nid: i for i, nid in enumerate(node_ids)}
+                    idx_to_id = {v: k for k, v in id_to_idx.items()}
+                    
+                    if idx_to_id[action_index] in candidate_nodes:
+                        self.second_open_stream_dest_node = idx_to_id[action_index]  
                     self.pending_params["mixer"]["index_node"] = self.second_open_stream_dest_node
-                    self.history.append(action_index) 
+                    if not self.second_open_stream_dest_node:
+                        raise RuntimeError("Selection for mixer node not valid")
+                    
+                    self.history.append(idx_to_id[action_index]) 
                     self.current_state["second_open_stream_dest_node"] = self.second_open_stream_dest_node
                     self.current_state["pending_params"] = self.pending_params
+                    self.level = 3
+                    self.get_feasible_actions()
                     return False, 0.0, True
 
             elif self.level == 3:
@@ -464,11 +475,11 @@ class FlowsheetDesign:
                         self.history.append(action_index)
 
                         self.current_state["pending_params"] = self.pending_params
-                        self.level = 0 
-                        self.get_feasible_actions()
                         done, reward, worked = self._complete_action_place_and_simulate()
                         self.current_state["completed_design"] = done 
-                        self.current_state["npv_norm"] = reward
+                        self.objective = reward
+                        self.level = 0 
+                        self.get_feasible_actions()
                 
                 elif self._chosen_unit_name() == "mixer":
                     index_value, _, _ = self.pending_params["mixer"].values()
@@ -477,10 +488,14 @@ class FlowsheetDesign:
                     true_cands = []
                     for i, out in all_candidates:
                         if i == index_value and i != src_node:
-                            true_cands.append(out)
-                    if not true_cands or action_index >= len(true_cands):
-                        return False, 0.0, False  
-                    out_value = true_cands[action_index]
+                            true_cands.append((i, out))
+                    
+                    for i, name in true_cands:
+                        if action_index == 1 and name == 'out1':
+                            out_value = 'out1'
+                        elif action_index == 0 and name == 'out0':
+                            out_value = 'out0'
+
                     self.pending_params["mixer"]["value_outlet"]= out_value
                     self.pending_params["mixer"]["tuple_value"] = (index_value, out_value)
                     self.history.append(action_index) 
@@ -488,11 +503,13 @@ class FlowsheetDesign:
                     self.second_open_stream = (index_value, out_value)
                     self.current_state["second_open_stream"] = self.second_open_stream
 
-                    self.level = 0 
-                    self.get_feasible_actions()
                     done, reward, worked = self._complete_action_place_and_simulate()
                     self.current_state["completed_design"] = done 
-                    self.current_state["npv_norm"] = reward
+                    self.objective = reward
+                    
+                    self.level = 0 
+                    self.get_feasible_actions()
+                    self.current_state['open_streams'] = self._enumerate_open_streams()
  
                 else:
                     if self._chosen_unit_name() not in ["add_solvent", "mixer"]:
@@ -508,7 +525,7 @@ class FlowsheetDesign:
             print("  exception value:", e)
             traceback.print_exc()
             # reset to prevent level loops
-            self._reset_action_state()
+            #self._reset_action_state()
             return False, 0.0, False
 
         return False, 0.0, True
@@ -574,7 +591,26 @@ class FlowsheetDesign:
         if exclude is None:
             return all_ops
         return [(n, l) for (n, l) in all_ops if not (n == exclude[0] and l == exclude[1])]
+    
+    def _all_units_at_max_capacity(self) -> bool:
+        cap_map = {
+            "distillation_column": self.env_config.max_distillation_columns,
+            "decanter": self.env_config.max_decanters,
+            "split": self.env_config.max_split,
+            "mixer": self.env_config.max_mixer,
+            "recycle": self.env_config.max_recycle,
+            "add_solvent": self.env_config.max_solvent,
+        }
 
+        for unit, max_cap in cap_map.items():
+            # if a unit has no cap, it never blocks termination
+            if max_cap is None:
+                return False
+
+            if self.counts.get(unit, 0) < max_cap:
+                return False
+
+        return True
 
     def _assert_stream_is_open(self, stream: Tuple[int, str]) -> None:
         opens = set(self._enumerate_open_streams())
@@ -620,7 +656,7 @@ class FlowsheetDesign:
 
             # Actually place
             if unit_name == "mixer":
-                index, second_o_str_name = self.current_state["pending_params"]['mixer']
+                index, second_o_str_name = self.current_state["pending_params"]['mixer']['tuple_value']
                 if second_o_str_name is None:
                     raise RuntimeError("Mixer requires a second open stream.")
                 n2, l2 = index, second_o_str_name
@@ -699,7 +735,9 @@ class FlowsheetDesign:
                     pass
 
             # reset to avoid level loops
-            #self._reset_action_state()
+            self._reset_action_state()
+            self.remove_last_four_actions()
+
             return False, 0.0, False
 
         # update counts if worked and a *new* node was placed (recycle places no node)
@@ -717,12 +755,18 @@ class FlowsheetDesign:
         #self._reset_action_state()
 
         # termination condition based on max units
-        finished_design = self.total_units_placed >= getattr(self.env_config, "max_total_units", 9999)
-        return finished_design, reward, True
+        self.current_state['completed_design'] = self.total_units_placed >= getattr(self.env_config, "max_total_units", 9999)
+        return False, reward, True
+    
+    def remove_last_four_actions(self):
+        history = self.history
+        updated_history = history[:-4]
+        self.history = updated_history
+
 
     def _reset_action_state(self):
-        self.current_state["current_level"] = None 
-        self.current_state["open_streams"] = None 
+        self.current_state["current_level"] = 0 
+        self.current_state["open_streams"] = self._enumerate_open_streams()
         self.current_state["chosen_unit"] = None 
         self.current_state["chosen_open_stream"] = None 
         self.current_state["pending_params"] = None 
@@ -835,58 +879,34 @@ class FlowsheetDesign:
         return log_probs
     
     def is_terminable(self):
-        return self.level == 0 and not self.finished_design
+        return self.level == 0 and not self.current_state['completed_design']
     
 
     @staticmethod
     def get_open_stream_mask_padded(flowsheets: List['FlowsheetDesign']):
         
         batch_open_streams = []
+        max_nodes = max(fs.sim.graph.number_of_nodes() for fs in flowsheets)
+        batch_node_outlet_masks = []
 
         for fs in flowsheets:
             open_streams = fs.current_state["open_streams"]
             batch_open_streams.append(open_streams)
-
-        batch_open_node_indices = []
-        open_stream_mask = []
-        batch_open_outlet_indices = []
-
-        for i, s in enumerate(batch_open_streams):
-            if s is None:
-                print(f"[ERROR] open_streams is None at batch index {i}")
-                print(f"Flowsheet / state object: {flowsheets[i]}")
-                raise RuntimeError("Found None open_streams")
-
-        #batch_open_streams = [s or [] for s in batch_open_streams]
-        max_open = max(len(s) for s in batch_open_streams)
-
+        
+        
         for streams, fs in zip(batch_open_streams, flowsheets):
             
             #canonical node ordering
             node_ids = list(fs.sim.graph.nodes)
             id_to_idx = {nid: i for i, nid in enumerate(node_ids)}
+            outlet_mask = torch.zeros(max_nodes, 2, dtype=torch.bool)
 
-            node_indices = []
-            outlet_indices = []
-            
             for node_id, outlet in streams:
-                node_indices.append(id_to_idx[node_id])
-                outlet_indices.append(fs.env_config.outlet_to_idx[outlet])
+                outlet_mask[id_to_idx[node_id], fs.env_config.outlet_to_idx[outlet]] = True
+            
+            batch_node_outlet_masks.append(outlet_mask)
 
-            pad = max_open - len(node_indices)
-            node_indices += [0] * pad
-            outlet_indices += [0] * pad
-            mask = [True] * (len(streams)) + [False] * pad
-
-            batch_open_node_indices.append(node_indices)
-            batch_open_outlet_indices.append(outlet_indices)
-            open_stream_mask.append(mask)
-
-        batch_open_node_indices = torch.tensor(batch_open_node_indices, dtype=torch.long)
-        open_stream_mask = torch.tensor(open_stream_mask, dtype=torch.bool)
-        batch_open_outlet_indices = torch.tensor(batch_open_outlet_indices, dtype =torch.long)
-
-        return batch_open_node_indices, open_stream_mask, batch_open_outlet_indices
+        return torch.stack(batch_node_outlet_masks, dim=0)
 
 
     @staticmethod
@@ -940,26 +960,24 @@ class FlowsheetDesign:
                     edge_embeds[ui, vi] = fs.edge_expert(edge=edge_data, edge_exists=True, is_recycle = edge_data.get("is_recycle"), carries_flow= False)
 
             # Extract open stream related information from the fs
-            batch_open_node_indices, open_stream_mask, batch_open_outlet_indices = FlowsheetDesign.get_open_stream_mask_padded(flowsheets)
+            open_stream_mask = FlowsheetDesign.get_open_stream_mask_padded(flowsheets)
             batch_latent_nodes_embeds.append(node_embeds)
             batch_latent_edges_embeds.append(edge_embeds)
 
         return dict(batch_latent_nodes_embeds = batch_latent_nodes_embeds, 
                 batch_latent_edges_embeds = batch_latent_edges_embeds, 
-                batch_open_node_indices = batch_open_node_indices, 
-                batch_open_outlet_indices = batch_open_outlet_indices, 
                 open_stream_mask = open_stream_mask)
     
     # ---- Implementation of abstract methods from `BaseTrajectory`
     def transition_fn(self, action: int) -> Tuple['BaseTrajectory', bool]:
         copied_fs= copy.deepcopy(self)
         copied_fs.take_action(action)
-        return copied_fs, copied_fs.finished_design
+        return copied_fs, copied_fs.current_state['completed_design']
     
     def to_max_evaluation_fn(self) -> float:
-        if self.current_state["npv_raw"] is None:
+        if self.objective is None:
             raise ValueError("Objective is `None`. Check if Flowsheet Simulator really works")
-        return self.current_state["npv_raw"]
+        return self.objective
     
     def make_mask_list_as_stacked_tensors(masking_list, whether_mixer, flowsheets):
 
@@ -1012,22 +1030,22 @@ class FlowsheetDesign:
         with torch.no_grad():
             with torch.amp.autocast(device_type=config.training_device):
                 batch = FlowsheetDesign.list_to_batch(flowsheets=trajectories, device=network.device)
-                lvl_0_logits, unit_predictions, padded_open_stream_masks, valid_nodes = network(batch)
+                lvl_0_logits, unit_predictions, padded_open_stream_masks, valid_nodes, state_info = network(batch)
                 for i, fs in enumerate(trajectories):
                     # get logits for this sequence and corresponding level
                     if fs.level == 0:
-                        logit = lvl_0_logits[i] # (N+1,)
-                        if len(fs.current_action_mask) != logit.shape[0]:
-                            terminate_logits = logit[0]
-                            open_stream_logits= logit[1:]
-                            open_stream_valid_logits = open_stream_logits[padded_open_stream_masks[i]]
-                            logits = torch.cat([terminate_logits.unsqueeze(0), open_stream_valid_logits],dim=0)
-                        else:
-                            logits = logit
+                        terminate_logits_per_batch = lvl_0_logits['terminate_logits'][i, :]
+                        open_stream_logits_per_batch= lvl_0_logits['open_stream_logits'][i, :, :]
+                        open_stream_valid_logits = open_stream_logits_per_batch[padded_open_stream_masks[i]] #isolate non padded nodes 
+                        logits = torch.cat([terminate_logits_per_batch, open_stream_valid_logits],dim=0)
                         logits = np.array(logits.float())
                     
                     if fs.level == 1:
                         node_id, _ = fs.current_state["chosen_open_stream"]
+                        node_ids = list(fs.sim.graph.nodes)
+                        id_to_idx = {nid: i for i, nid in enumerate(node_ids)}
+                        node_id = id_to_idx[node_id]
+
                         # collect logits for units corresponding to ONLY this open stream 
                         logits = []
                         for _, unit_name in enumerate(fs.env_config.units_map_indices_type):
@@ -1035,9 +1053,13 @@ class FlowsheetDesign:
                             logits.append(logit.float())
                         logits = np.array(logits) # (length of all possible units, _)
                     
-                    if fs.level == 2: # extract parameter predictions 
-                        unit_id, unit_name = fs.current_state["chosen_unit"]
+                    if fs.level == 2: # extract parameter predictions
+                        node_ids = list(fs.sim.graph.nodes)
+                        id_to_idx = {nid: i for i, nid in enumerate(node_ids)} 
+                        _, unit_name = fs.current_state["chosen_unit"]
                         node_id, _ = fs.current_state["chosen_open_stream"]
+                        node_id = id_to_idx[node_id]
+
                         logits = []
                         if unit_name == "distillation_column":
                             logits = unit_predictions[unit_name]["distillate_fraction_categorical"][i, node_id, :]
@@ -1057,15 +1079,18 @@ class FlowsheetDesign:
 
                     if fs.level == 3:
                         logits = []
-                        unit_id, unit_name = fs.current_state["chosen_unit"]
+                        node_ids = list(fs.sim.graph.nodes)
+                        id_to_idx = {nid: i for i, nid in enumerate(node_ids)} 
+                        _, unit_name = fs.current_state["chosen_unit"]
                         node_id, _ = fs.current_state["chosen_open_stream"]
+                        node_id = id_to_idx[node_id]
 
                         if unit_name == "add_solvent":
                             index_comp, comp_name, _, _ = fs.current_state["pending_params"]["add_solvent"].values()
                             logits = unit_predictions[unit_name]["component_amount"][i, node_id, index_comp, :]
                         elif unit_name == "mixer":
-                            dest_node, out_value = fs.current_state["second_open_stream"]
-                            outlet_logits = unit_predictions[unit_name]["destinate_node_outlets"][i, dest_node, 0:len(fs.current_action_mask)]
+                            dest_node = fs.current_state["pending_params"]["mixer"]["index_node"]
+                            outlet_logits = unit_predictions[unit_name]["destinate_node_outlets"][i, id_to_idx[dest_node], :]
                             logits = outlet_logits
 
                         logits = np.array(logits.float())
@@ -1173,8 +1198,6 @@ class FlowsheetDesign:
             mixer_masks = mixer_masks, 
             node_valid_mask = node_valid_mask, 
             edge_valid_mask = edge_valid_mask,
-            batch_open_node_indices = embeddings_dict["batch_open_node_indices"],
-            batch_open_outlet_indices = embeddings_dict["batch_open_outlet_indices"],
             open_stream_mask = embeddings_dict["open_stream_mask"],
         )
 

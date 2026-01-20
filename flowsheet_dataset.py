@@ -38,6 +38,7 @@ class RandomDataset(Dataset):
         self.batch_size = batch_size
         self.custom_num_batches = custom_num_batches
         self.path_to_pickle = path_to_pickle
+        self.SKIP_ACTION = 901
         with open(path_to_pickle, "rb") as f:
             self.instances = pickle.load(f)  # list of dictionaries
 
@@ -60,7 +61,7 @@ class RandomDataset(Dataset):
 
         # precompute everything once 
         for i, instance in enumerate(self.instances):
-            fs = FlowsheetDesign(instance)
+            fs = FlowsheetDesign(instance['problem_instance'], gen_config=gen_config, env_config=env_config)
             sequence_of_actions_idx = list(range(len(instance["action_seq"])))
             self.targets_to_sample.extend([(i, j) for j in sequence_of_actions_idx])
             # For each target_idx == j, we want the sequence state *before* taking action j (i.e., after j-1 actions)
@@ -72,10 +73,12 @@ class RandomDataset(Dataset):
                 # snapshot current state (this corresponds to partial sequence up to j-1)
                 fs_copy = _clone_sequence(fs)
                 self._flat_sequences.append(fs_copy)
-                self._flat_targets.append(action)                    
-                self._flat_levels.append(fs.level)
-                fs.take_action(action)
-
+                self._flat_targets.append(action)  
+                if action != fs.SKIP_ACTION:
+                    fs.take_action(action)
+                
+                self._flat_levels.append(len(self._flat_levels) % 4)
+                
         print(f"Loaded dataset. {len(self.instances)} sequences with a total of {len(self.targets_to_sample)} datapoints.")
 
         if custom_num_batches is None:
@@ -112,9 +115,11 @@ class RandomDataset(Dataset):
         levels_list       = [self._flat_levels[k]    for k in flat_indices]
 
         # Create the input batch from the partial sequences.
-        batch_input = FlowsheetDesign.list_to_batch(sequences=partial_sequences,
+        batch_input = FlowsheetDesign.list_to_batch(flowsheets=partial_sequences,
                                                    device=torch.device("cpu"),
-                                                   include_feasibility_masks=True)
+                                                   include_feasibility_masks=False)
+        
+        batch_inputs = batch_input.pop("state_information", None)
 
         # We now create the targets. We separate it into targets for level 0 and 1.
         # We only set the target action as target for the current level the sequence is in.
@@ -124,14 +129,19 @@ class RandomDataset(Dataset):
         levels  = torch.tensor(levels_list,      dtype=torch.long)   
 
         batch_targets = [
-            torch.where(levels == level, 
-                        targets, # # We only set the target action as target for the current level the molecule is in.
-                        torch.full_like(targets, -1)) # # For all other levels, we set it to -1 for a molecule.
-            for level in (0, 1)
+            torch.where(
+                (levels == level) & (targets != self.SKIP_ACTION), 
+                targets, # # We only set the target action as target for the current level the molecule is in.
+                torch.full_like(targets, -1)) # # For all other levels, we set it to -1 for a molecule.
+            for level in (0, 1, 2, 3)
         ]
 
-        return dict(
+        samples = dict(
             input=batch_input,
             target_zero=batch_targets[0],
-            target_one=batch_targets[1]
+            target_one=batch_targets[1], 
+            target_two = batch_targets[2], 
+            target_three = batch_targets[3]
         )
+
+        return samples

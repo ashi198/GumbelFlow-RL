@@ -122,9 +122,12 @@ class GumbeldoreDataset:
             for i, _ in enumerate(problem_instances):
                 for flowsheet in results[i]:  
                     if flowsheet.objective > float("-inf"):
-                        instances_dict[flowsheet.smiles_string] = dict(
+                        instances_dict[flowsheet.identifier] = dict(
+                            problem_instance = flowsheet.problem_instance,
+                            identifier = flowsheet.identifier, 
                             action_seq=flowsheet.history,
                             obj=flowsheet.objective,
+                            graph = flowsheet.sim.graph
                         )
             generated_fs = list(instances_dict.values())
             generated_fs = sorted(generated_fs, key=lambda x: x["obj"], reverse=True)[:self.gumbeldore_config["num_trajectories_to_keep"]]
@@ -140,7 +143,7 @@ class GumbeldoreDataset:
                 if os.path.isfile(destination_path):
                     with open(destination_path, "rb") as f:
                         existing_fs = pickle.load(f)  # list of dicts
-                    temp_d = {x["smiles"]: x for x in existing_fs + merged_fs} #check
+                    temp_d = {x["identifier"]: x for x in existing_fs + merged_fs} #check
                     merged_fs = list(temp_d.values())
                     merged_fs = sorted(merged_fs, key=lambda x: x["obj"], reverse=True)[
                                     :self.gumbeldore_config["num_trajectories_to_keep"]]
@@ -152,10 +155,9 @@ class GumbeldoreDataset:
             # Get overall best metrics and molecules
             metrics_return["mean_top_20_obj"] = np.array([x["obj"] for x in merged_fs[:20]]).mean()
             metrics_return["mean_kept_obj"] = np.array([x["obj"] for x in merged_fs]).mean()
-            metrics_return["top_20_flowsheets"] = [{x["smiles"]: x["obj"] for x in merged_fs[:20]}]
+            metrics_return["top_20_flowsheets"] = [{x["identifier"]: x["obj"] for x in merged_fs[:20]}]
 
             return metrics_return
-
 
 
 #@ray.remote(max_calls=1)
@@ -170,7 +172,7 @@ def async_sbs_worker(gen_config, env_config, job_pool: JobPool, network_weights:
         return FlowsheetDesign.log_probability_fn(config = gen_config, trajectories=trajectories, network=network, device=device)
     
     def batch_leaf_evaluation_fn(trajectories: List[FlowsheetDesign]) -> np.array:
-        objs = [obj for obj in trajectories.objective]
+        objs = [traj.objective for traj in trajectories]
         return objs
 
     def child_transition_fn(trajectory_action_pairs: List[Tuple[FlowsheetDesign, int]]):

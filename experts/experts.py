@@ -47,7 +47,7 @@ class Decanter(nn.Module):
 
     def embed(self, batch_size: int):
         return self.type_embed(
-            torch.tensor([0] * batch_size, dtype = torch.long) #(batch_size, latent_dim)
+            torch.tensor([0] * batch_size, dtype = torch.long, device=self.config.training_device) #(batch_size, latent_dim)
         )
         
     def predict(self, x: torch.FloatTensor):
@@ -73,7 +73,7 @@ class Mixer(nn.Module):
 
     def embed(self, batch_size: int):
         return self.type_embed(
-            torch.tensor([0] * batch_size, dtype = torch.long) #(batch_size, latent_dim)
+            torch.tensor([0] * batch_size, dtype = torch.long, device=self.config.training_device) #(batch_size, latent_dim)
         )
         
     def predict(self, x: torch.FloatTensor, mixer_mask = None):
@@ -88,7 +88,7 @@ class Mixer(nn.Module):
         # Apply mask only if it exists
 
         if mixer_mask is not None:
-            mixer_mask = torch.as_tensor(mixer_mask, device=scores.device, dtype=torch.bool)
+            mixer_mask = torch.as_tensor(mixer_mask, device=self.config.training_device, dtype=torch.bool)
             scores = scores.masked_fill(~mixer_mask, -1e9) 
 
         return {
@@ -110,7 +110,7 @@ class Split(nn.Module):
 
     def embed(self, node_data: dict):
         sr = node_data["params"]["split_ratio"]
-        sr_tensor = torch.tensor([float(sr)], dtype=torch.float32, device= self.config.training_device)
+        sr_tensor = torch.tensor([float(sr)], dtype=torch.float32, device=self.config.training_device)
         return self.split_ratio_and_type_embed(sr_tensor)
         
     def predict(self, x: torch.FloatTensor):
@@ -145,7 +145,7 @@ class Recycler(nn.Module):
 
         # mask out not allowed nodes (e.g self connections, system source nodes)
         if recycler_mask is not None:
-            recycler_mask = torch.as_tensor(recycler_mask, device=scores.device, dtype=torch.bool)
+            recycler_mask = torch.as_tensor(recycler_mask, device=self.config.training_device, dtype=torch.bool)
             scores = scores.masked_fill(~recycler_mask, -1e9) 
 
         return {
@@ -219,7 +219,7 @@ class FlowExpert(nn.Module):
         self.flow_latent_upscale = nn.Linear(self.flow_latent_dim, self.gen_config.latent_dim)
 
     def flat_gamma_to_matrix(self, system_gamma_inf, num_components):
-        flat = torch.tensor(system_gamma_inf, dtype=torch.float32)
+        flat = torch.tensor(system_gamma_inf, dtype=torch.float32, device=self.gen_config.training_device)
         gamma_local = torch.zeros(num_components, num_components)
         idx = 0
         for i in range(num_components):
@@ -236,10 +236,10 @@ class FlowExpert(nn.Module):
         # interaction_params: (batch_size, num_components, num_components, 1)
         # amount: (batch_size, num_components, 1)
 
-        component_ids = torch.tensor([x.get("system_indices")], dtype=torch.long)
+        component_ids = torch.tensor([x.get("system_indices")], dtype=torch.long, device=self.gen_config.training_device)
         gamma = self.flat_gamma_to_matrix(x.get("system_gammas_inf"), component_ids.shape[1])
-        interaction_params = gamma.unsqueeze(0).unsqueeze(-1)
-        amount = torch.tensor(x.get("output_flows")['out0'][0:component_ids.shape[1]], dtype=torch.float32).unsqueeze(-1)
+        interaction_params = gamma.unsqueeze(0).unsqueeze(-1).to(device=self.gen_config.training_device)
+        amount = torch.tensor(x.get("output_flows")['out0'][0:component_ids.shape[1]], device=self.gen_config.training_device, dtype=torch.float32).unsqueeze(-1)
 
         nodes = self.component_linear(component_ids) + self.amount_linear(amount) # (batch_size, num_components, flow_latent_dim)
         edges = self.edge_linear(interaction_params) # (batch_size, num_components, num_components, flow_latent_dim)
@@ -311,8 +311,8 @@ class OpenStreamExpert(nn.Module):
 
     def predict(self, x: torch.FloatTensor):
         
-        # open_stream_embeddings: (B, K, latent_dim)
-        logits = self.logit_linear(x)  # (B, K, 1)
+        # open_stream_embeddings: (B, N, latent_dim)
+        logits = self.logit_linear(x)  # (B, N, 1)
         
         return logits
 

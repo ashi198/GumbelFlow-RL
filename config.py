@@ -32,10 +32,11 @@ class GeneralConfig:
         self.CUDA_VISIBLE_DEVICES = "0,1,2,3"  # Must be set, as ray can have problems detecting multiple GPUs
         self.training_device = "cpu"  # Device on which to perform the supervised training
         self.num_epochs = 2  # Number of epochs (i.e., passes through training set) to train
-        self.batch_size_training = 64 #Batch size to use for the supervised training during finetuning. 
-        self.num_batches_per_epoch = 20  # Can be None, then we just do one pass through generated dataset
+        self.batch_size_training = 16 #Batch size to use for the supervised training during finetuning. 
+        self.num_batches_per_epoch = None  # Can be None, then we just do one pass through generated dataset
 
         self.wall_clock_limit = None
+        
 
         # Optimizer
         self.optimizer = {
@@ -52,7 +53,7 @@ class GeneralConfig:
         self.gumbeldore_config = {
 
             # Number of trajectories with the the highest objective function evaluation to keep for training
-            "num_trajectories_to_keep": 100,
+            "num_trajectories_to_keep": 3,
             "keep_intermediate_trajectories": True,  # if True, we consider all intermediate, terminable trajectories
             "devices_for_workers": ["cpu"] * 1,
             "destination_path": "./data/generated_flowsheets.pickle",
@@ -87,8 +88,6 @@ class EnvConfig:
     def __init__(self):
 
         # ----- Core dimensional settings -----
-        # limit for full actions (=placing unit) per feed stream
-        self.max_steps_for_flowsheet_synthesis = 2
 
         # maximum number of components present simultaneously in a flowsheet
         self.max_number_of_components = 3
@@ -206,7 +205,7 @@ class EnvConfig:
 
 
         # Action limits
-        self.max_total_units = 10    # overall cap on placed units (excluding feed)
+        self.max_total_units = 10  # overall cap on placed units (excluding feed)
         self.max_distillation_columns = 5
         self.max_decanters = 5
         self.max_split = 5

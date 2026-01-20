@@ -40,16 +40,16 @@ def train_for_one_epoch(epoch: int, gen_config, env_config, network: FlowsheetNe
     print("Generated Flowsheets")
     print(f"Mean obj. over fresh best flowsheets: {metrics['mean_best_gen_obj']:.3f}")
     print(f"Best / worst obj. over fresh best flowsheets: {metrics['best_gen_obj']:.3f}, {metrics['worst_gen_obj']:.3f}")
-    print(f"Mean obj. over all time top 5 flowsheets: {metrics['mean_top_5_obj']:.3f}")
-    print(f"All time best sequence: {list(metrics['top_5_sequences'][0].values())[0]:.3f}")
+    print(f"Mean obj. over all time top 20 flowsheets: {metrics['mean_top_20_obj']:.3f}")
+    print(f"All time best sequence: {list(metrics['top_20_flowsheets'][0].values())[0]:.3f}")
 
     torch.cuda.empty_cache()
     time.sleep(1)
     print("---- Loading dataset")
-    dataset = RandomDataset(gen_config, env_config, gen_config.gumbeldore_config["destination_path"], batch_size=gen_config.batch_size_training,
-                                    custom_num_batches=gen_config.num_batches_per_epoch)
+    dataset = RandomDataset(gen_config=gen_config, env_config=env_config, path_to_pickle=gen_config.gumbeldore_config["destination_path"], batch_size=gen_config.batch_size_training,
+                                    custom_num_batches=gen_config.num_batches_per_epoch, no_random= True)
 
-    dataloader = DataLoader(dataset, batch_size=1, shuffle=True, num_workers=gen_config.num_dataloader_workers,
+    dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=gen_config.num_dataloader_workers,
                             pin_memory=True, persistent_workers=True)
 
     # Train for one epoch
@@ -59,13 +59,17 @@ def train_for_one_epoch(epoch: int, gen_config, env_config, network: FlowsheetNe
     for parameter in network.parameters():
         parameter.requires_grad = False
 
-    network.terminate_or_open_stream_logits.weight.requires_grad = True  
-    network.terminate_or_open_stream_logits.bias.requires_grad = True  
-    network.unit_predictions.bias.requires_grad = True  
-    network.unit_predictions.bias.requires_grad = True  
+    network.open_stream_head.weight.requires_grad = True  
+    network.open_stream_head.bias.requires_grad = True  
+    network.terminate_head.weight.requires_grad = True  
+    network.terminate_head.bias.requires_grad = True  
+    #network.unit_predictions.bias.requires_grad = True  
+    #network.unit_predictions.bias.requires_grad = True  
 
     accumulated_loss_lvl_zero = 0
     accumulated_loss_lvl_one = 0
+    accumulated_loss_lvl_two = 0
+    accumulated_loss_lvl_three = 0
 
     num_batches = len(dataloader)
     progress_bar = tqdm(range(num_batches))
@@ -79,10 +83,12 @@ def train_for_one_epoch(epoch: int, gen_config, env_config, network: FlowsheetNe
         # targets for the logit levels
         target_zero = data["target_zero"][0].to(network.device)
         target_one = data["target_one"][0].to(network.device)
+        target_two = data["target_two"][0].to(network.device)
+        target_four = data["target_three"][0].to(network.device)
 
         with autocast(device_type=gen_config.training_device): 
 
-            logits_zero, logits_one = network(input_data)
+            logits_zero, logits_one, padded_open_stream_masks, valid_nodes, state_info  = network(input_data)
 
             # We mask the output according to feasibility
             logits_zero[input_data["feasibility_mask_level_zero"]] = float("-inf")
@@ -117,6 +123,7 @@ def train_for_one_epoch(epoch: int, gen_config, env_config, network: FlowsheetNe
         batch_loss = loss.item()
         accumulated_loss_lvl_zero += loss_zero.item()
         accumulated_loss_lvl_one += loss_one.item()
+        
 
         progress_bar.set_postfix({"batch_loss": batch_loss})
 
