@@ -152,7 +152,7 @@ class GumbeldoreDataset:
                 with open(destination_path, "wb") as f:
                     pickle.dump(merged_fs, f)
 
-            # Get overall best metrics and molecules
+            # Get overall best metrics and flowsheets
             metrics_return["mean_top_20_obj"] = np.array([x["obj"] for x in merged_fs[:20]]).mean()
             metrics_return["mean_kept_obj"] = np.array([x["obj"] for x in merged_fs]).mean()
             metrics_return["top_20_flowsheets"] = [{x["identifier"]: x["obj"] for x in merged_fs[:20]}]

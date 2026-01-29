@@ -31,7 +31,7 @@ class FlowsheetNetwork(nn.Module):
         self.open_stream_head = nn.Linear(self.latent_dim, self.env_config.max_outlets)
         
         # define all unit experts to get embeddings 
-        self.unit_experts = {
+        self.unit_experts =  nn.ModuleDict({
             "distillation_column": DistillationColumn(gen_config), 
             "decanter": Decanter(gen_config),   
             "mixer": Mixer(gen_config),
@@ -39,19 +39,13 @@ class FlowsheetNetwork(nn.Module):
             "recycle": Recycler(gen_config), 
             "add_solvent": AddSolvent(gen_config, env_config),    
             "flow_expert": FlowExpert(gen_config, env_config),
-            }
-        
-        self.edge_expert = EdgeFlowExpert(gen_config, self.unit_experts["flow_expert"])
-        self.open_stream_expert = OpenStreamExpert(gen_config, env_config, self.unit_experts["flow_expert"])
-
+            })
 
     def forward(self, x):
         
         # All nodes and edges already in latent space and batched per flowsheet (N = all nodes within the graph, d= latent_dim, K= num of open stream)
         batch_latent_nodes_embed = x["batch_latent_nodes"] # (B, N, d) 
         batch_latent_edges_embed = x["batch_latent_edges"] # (B, N + 1, N + 1, d)
-        state_info = x["state_information"]
-        levels = torch.tensor([s['current_level'] for s in state_info], dtype=torch.long)
         valid_nodes = x["node_valid_mask"] # for padding for additive attention
         terminate_or_open_stream_logits = {}
 
@@ -59,7 +53,7 @@ class FlowsheetNetwork(nn.Module):
         padding_attn_mask = (~valid_nodes[:, :, None] | ~valid_nodes[:, None, :]) # (B, N, N)
         padding_attn_mask = padding_attn_mask.float() * (-1e9)
     
-        level_embed = self.virtual_node_embedding(levels).unsqueeze(1) # only virtual residue gets level info
+        level_embed = self.virtual_node_embedding(x['levels']).unsqueeze(1) # only virtual residue gets level info
         batch_latent_nodes_embed = torch.cat([level_embed, batch_latent_nodes_embed], dim=1) # (B, N + 1, d)
 
         # Send node and edge embeddings to core transformer 
@@ -70,13 +64,10 @@ class FlowsheetNetwork(nn.Module):
         latent_virtual_node = nodes_out[:, 0, :] # (B, d)
         terminate_logits = self.terminate_head(latent_virtual_node) # (B,) 
         latent_nodes_transformed = nodes_out[:, 1:, :] # (B, N, d) 
-
-        # Get embedding for outlet streams per node
-        #outlet_embeds = self.open_stream_expert.outlet_emb(latent_nodes_transformed) #(B, N, d)
-        #stream_embeds = latent_nodes_transformed + outlet_embeds
-
-        # Now provide stream embedding to open_stream head to get logits 
-        open_stream_logits = self.open_stream_head(latent_nodes_transformed).squeeze(-1)
+        
+        # Now provide stream embedding to open_stream head to get logits   
+        open_stream_embeds = latent_nodes_transformed + x["batch_latent_open_streams"]
+        open_stream_logits = self.open_stream_head(open_stream_embeds).squeeze(-1)
         open_stream_logits = open_stream_logits.masked_fill(~x["open_stream_mask"], -1e9) # mask out all non valid streams from padding
         
         terminate_or_open_stream_logits['terminate_logits'] = terminate_logits
@@ -92,7 +83,7 @@ class FlowsheetNetwork(nn.Module):
             elif unit_type == "mixer":
                 unit_predictions[unit_type] = expert.predict(latent_nodes_transformed, x['mixer_masks'])
             
-        return terminate_or_open_stream_logits, unit_predictions, x["open_stream_mask"], valid_nodes, state_info
+        return terminate_or_open_stream_logits, unit_predictions
     
     
     def get_weights(self):

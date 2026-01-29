@@ -8,7 +8,6 @@ from torch.utils.data import Dataset
 import copy
 from environment.environment_actions_graphs import FlowsheetDesign
 
-#check if this works the same way for both autoregressive and masked mode
 def _clone_sequence(fs: FlowsheetDesign) -> FlowsheetDesign:
 
     # Prefer a cheap custom copy, if not possible, make deep copy
@@ -17,19 +16,21 @@ def _clone_sequence(fs: FlowsheetDesign) -> FlowsheetDesign:
     return copy.deepcopy(fs)
 
 class RandomDataset(Dataset):
+
     """
-    Dataset for supervised training of the protein sequence design given as a list pseudo-expert sequence.
-    Each sequence is given as a dictionary with the following keys and values
+    Dataset for supervised training of flowsheet design given as a list pseudo-expert flowsheet.
+    Each flowsheet is given as a dictionary with the following keys and values
           "start_residue": [int] the int representing the residue from which to start
-          "action_seq": List[List[int]] Actions which need to be taken on each index to create the sequence
-          "smiles": [str] Corresponding sequence string
+          "action_seq": List[List[int]] Actions which need to be taken on each index to create the flowsheet
+          "smiles": [str] Corresponding flowsheet string
           "obj": [float] Objective function evaluation
 
-    Each datapoint in this dataset is a partial sequence: We sample an instance, randomly choose an index up to which
+    Each datapoint in this dataset is a partial flowsheet: We sample an instance, randomly choose an index up to which
     all actions will be performed. Then, ending up at action index 0, we take the next item in the action seq
     (which corresponds to a list all actions that need to be taken from index to index) as training target.
-    As the number of atoms will be different for molecules in a batch, we pad the atoms, and set all labels corresponding
-    to the padded atoms to -1 (in the CE-loss, this will be specified as `ignore_index=-1`.
+    As the number of nodes will be different for flowsheets in a batch, we pad the nodes, and set all labels corresponding
+    to the padded nodes to -1 (in the CE-loss, this will be specified as `ignore_index=-1`.
+
     """
     def __init__(self, gen_config, env_config,  path_to_pickle: str, batch_size: int, custom_num_batches: Optional[int],
                  no_random: bool = False):
@@ -42,7 +43,7 @@ class RandomDataset(Dataset):
         with open(path_to_pickle, "rb") as f:
             self.instances = pickle.load(f)  # list of dictionaries
 
-        # We want to uniformly sample from partial sequences. So for each instance, check how many partial molecules
+        # We want to uniformly sample from partial flowsheets. So for each instance, check how many partial flowsheets
         # there are, and create a list of them where each entry is a tuple (int, int), where first entry is index of
         # the instance, and second entry is the index in the action sequence which is the training target.
         self.targets_to_sample: List[Tuple[int, int]] = []
@@ -74,11 +75,10 @@ class RandomDataset(Dataset):
                 fs_copy = _clone_sequence(fs)
                 self._flat_sequences.append(fs_copy)
                 self._flat_targets.append(action)  
+                self._flat_levels.append(fs.level)
                 if action != fs.SKIP_ACTION:
                     fs.take_action(action)
-                
-                self._flat_levels.append(len(self._flat_levels) % 4)
-                
+
         print(f"Loaded dataset. {len(self.instances)} sequences with a total of {len(self.targets_to_sample)} datapoints.")
 
         if custom_num_batches is None:
@@ -98,7 +98,7 @@ class RandomDataset(Dataset):
         Returns: Dictionary with keys:
 
         """
-        partial_sequences: List[FlowsheetDesign] = []   # partial sequences which will become the batch
+        partial_sequences: List[FlowsheetDesign] = []   # partial flowsheets which will become the batch
         instance_targets: List[List[int]] = []  # corresponding targets taken from the instances
 
         if self.no_random:
@@ -113,17 +113,16 @@ class RandomDataset(Dataset):
         partial_sequences = [self._flat_sequences[k] for k in flat_indices]
         instance_targets  = [self._flat_targets[k]   for k in flat_indices]
         levels_list       = [self._flat_levels[k]    for k in flat_indices]
+        indices_for_tracking = [k for k in flat_indices]
 
-        # Create the input batch from the partial sequences.
+        # Create the input batch from the partial flowsheets.
         batch_input = FlowsheetDesign.list_to_batch(flowsheets=partial_sequences,
                                                    device=torch.device("cpu"),
-                                                   include_feasibility_masks=False)
-        
-        batch_inputs = batch_input.pop("state_information", None)
+                                                   include_feasibility_masks=True)
 
-        # We now create the targets. We separate it into targets for level 0 and 1.
-        # We only set the target action as target for the current level the sequence is in.
-        # For all other levels, we set it to -1 for a sequence. (ignore)
+        # We now create the targets. We separate it into targets for level 0, 1, 2, and 3.
+        # We only set the target action as target for the current level the flowsheet is in.
+        # For all other levels, we set it to -1 for a flow. (ignore)
         # Vectorized level-specific targets
         targets = torch.tensor(instance_targets, dtype=torch.long)   
         levels  = torch.tensor(levels_list,      dtype=torch.long)   
@@ -136,12 +135,17 @@ class RandomDataset(Dataset):
             for level in (0, 1, 2, 3)
         ]
 
+        batch_input['batch_latent_nodes'] = batch_input['batch_latent_nodes'].detach()
+        batch_input['batch_latent_edges'] = batch_input['batch_latent_edges'].detach()
+        batch_input['batch_latent_open_streams'] = batch_input['batch_latent_open_streams'].detach()
+
         samples = dict(
             input=batch_input,
             target_zero=batch_targets[0],
             target_one=batch_targets[1], 
             target_two = batch_targets[2], 
-            target_three = batch_targets[3]
+            target_three = batch_targets[3],
+            indices_for_tracking = indices_for_tracking
         )
 
         return samples

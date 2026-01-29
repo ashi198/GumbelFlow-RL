@@ -1,4 +1,4 @@
-import argparse, copy, importlib, os, time, ray, torch, mlflow, datetime
+import argparse, copy, os, time, ray, torch, mlflow, datetime
 
 from torch.nn import CrossEntropyLoss
 from torch.optim.lr_scheduler import LambdaLR
@@ -10,12 +10,11 @@ from logger import Logger
 from flowsheet_dataset import RandomDataset
 
 import numpy as np
-import pandas as pd
 from config import GeneralConfig, EnvConfig
 
 from core.gumbeldore_dataset import GumbeldoreDataset
 from model.policy_arch import FlowsheetNetwork, dict_to_cpu
-from utils import set_mlflow_connection
+from utils import set_mlflow_connection, build_logit_tensors_per_level
 
 os.environ["RAY_DEDUP_LOGS"]="0"
 os.environ["RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES"]="1"
@@ -41,7 +40,7 @@ def train_for_one_epoch(epoch: int, gen_config, env_config, network: FlowsheetNe
     print(f"Mean obj. over fresh best flowsheets: {metrics['mean_best_gen_obj']:.3f}")
     print(f"Best / worst obj. over fresh best flowsheets: {metrics['best_gen_obj']:.3f}, {metrics['worst_gen_obj']:.3f}")
     print(f"Mean obj. over all time top 20 flowsheets: {metrics['mean_top_20_obj']:.3f}")
-    print(f"All time best sequence: {list(metrics['top_20_flowsheets'][0].values())[0]:.3f}")
+    print(f"All time best flowsheet: {list(metrics['top_20_flowsheets'][0].values())[0]:.3f}")
 
     torch.cuda.empty_cache()
     time.sleep(1)
@@ -56,15 +55,16 @@ def train_for_one_epoch(epoch: int, gen_config, env_config, network: FlowsheetNe
     network.train()
 
     # freeze layers except the last
-    for parameter in network.parameters():
-        parameter.requires_grad = False
+    '''for parameter in network.parameters():
+        parameter.requires_grad = True
 
     network.open_stream_head.weight.requires_grad = True  
     network.open_stream_head.bias.requires_grad = True  
     network.terminate_head.weight.requires_grad = True  
     network.terminate_head.bias.requires_grad = True  
+    
     #network.unit_predictions.bias.requires_grad = True  
-    #network.unit_predictions.bias.requires_grad = True  
+    #network.unit_predictions.bias. = True'''  
 
     accumulated_loss_lvl_zero = 0
     accumulated_loss_lvl_one = 0
@@ -78,35 +78,43 @@ def train_for_one_epoch(epoch: int, gen_config, env_config, network: FlowsheetNe
 
     for _ in progress_bar:
         data = next(data_iter)
+        indices_for_tracking = data.pop('indices_for_tracking')
         input_data = {k: v[0].to(network.device) for k, v in data["input"].items()}
         
         # targets for the logit levels
         target_zero = data["target_zero"][0].to(network.device)
         target_one = data["target_one"][0].to(network.device)
         target_two = data["target_two"][0].to(network.device)
-        target_four = data["target_three"][0].to(network.device)
+        target_three = data["target_three"][0].to(network.device)
 
         with autocast(device_type=gen_config.training_device): 
 
-            logits_zero, logits_one, padded_open_stream_masks, valid_nodes, state_info  = network(input_data)
-
-            # We mask the output according to feasibility
-            logits_zero[input_data["feasibility_mask_level_zero"]] = float("-inf")
+            terminate_or_open_streams_logits, unit_predictions = network(input_data)
             
-            # loss is calculated only for the logits of the selected position
-            B = logits_one.size(0)
-            batch_idx = torch.arange(B, device=logits_one.device)
-        
-            logits_one_for_selected_position = logits_one[batch_idx, input_data["selected_position"]] 
-            logits_one_for_selected_position[input_data["feasibility_mask_level_one"]] = float("-inf")
+            #build logits based on selected units and streams 
+            lvl_zero_logits, lvl_one_logits, lvl_two_logits, lvl_three_logits = build_logit_tensors_per_level(dataset= dataset, 
+                                                                                input_data=input_data, terminate_or_open_streams_logits=terminate_or_open_streams_logits,
+                                                                                unit_predictions=unit_predictions, indices_for_tracking = indices_for_tracking)
+            
+            lvl_zero_logits[input_data["feasibility_mask_level_zero"]] = float("-inf")
+            lvl_one_logits[input_data["feasibility_mask_level_one"]] = float("-inf")
+            lvl_two_logits[input_data["feasibility_mask_level_two"]] = float("-inf")
+            lvl_three_logits[input_data["feasibility_mask_level_three"]] = float("-inf")
 
             criterion = CrossEntropyLoss(reduction="mean", ignore_index=-1)
-            loss_zero = criterion(logits_zero, target_zero)
+            loss_zero = criterion(lvl_zero_logits, target_zero)
             loss_zero = torch.tensor(0.) if torch.isnan(loss_zero) else loss_zero
             
-            loss_one = criterion(logits_one_for_selected_position, target_one)
+            loss_one = criterion(lvl_one_logits, target_one)
             loss_one = torch.tensor(0.) if torch.isnan(loss_one) else loss_one
-            loss = loss_zero + loss_one  
+
+            loss_two = criterion(lvl_two_logits, target_two)
+            loss_two = torch.tensor(0.) if torch.isnan(loss_two) else loss_two
+            
+            loss_three = criterion(lvl_three_logits, target_three)
+            loss_three = torch.tensor(0.) if torch.isnan(loss_three) else loss_three
+
+            loss = loss_zero + loss_one + loss_two + loss_three
 
         # Optimization step
         optimizer.zero_grad(set_to_none=True)
@@ -123,7 +131,8 @@ def train_for_one_epoch(epoch: int, gen_config, env_config, network: FlowsheetNe
         batch_loss = loss.item()
         accumulated_loss_lvl_zero += loss_zero.item()
         accumulated_loss_lvl_one += loss_one.item()
-        
+        accumulated_loss_lvl_two += loss_two.item()
+        accumulated_loss_lvl_three += loss_three.item()
 
         progress_bar.set_postfix({"batch_loss": batch_loss})
 
@@ -131,10 +140,12 @@ def train_for_one_epoch(epoch: int, gen_config, env_config, network: FlowsheetNe
 
     metrics["loss_level_zero"] = accumulated_loss_lvl_zero / num_batches
     metrics["loss_level_one"] = accumulated_loss_lvl_one / num_batches
+    metrics["loss_level_two"] = accumulated_loss_lvl_two / num_batches
+    metrics["loss_level_three"] = accumulated_loss_lvl_three / num_batches
 
-    top_5_sequences = metrics["top_5_sequences"]
-    del metrics["top_5_sequences"]
-    return metrics, top_5_sequences
+    top_20_flowsheets = metrics["top_20_flowsheets"]
+    del metrics["top_20_flowsheets"]
+    return metrics, top_20_flowsheets
 
 def evaluate(eval_type: str, gen_config, env_config, network: FlowsheetNetwork):
     gen_config.gumbeldore_config["destination_path"] = None

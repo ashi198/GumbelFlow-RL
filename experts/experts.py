@@ -3,8 +3,7 @@ import torch
 from model.core_transformer_block import CoreTransformerEncoder 
 
 
-# Implementation of all unit experts
-# make sure to add recylcer mask in batch_process 
+# Implementation of all unit expert 
 # normalization for AddSolvent components? 
 # normalization for interaction components in Flow Expert? 
 
@@ -198,7 +197,8 @@ class AddSolvent(nn.Module):
         "component_logit": mlp_out[:, :, :, 0].squeeze(-1), # (batch_size. num_nodes, num_components) <- distribution over which component to add 
         "component_amount": mlp_out[:, :, :, 1:] # (batch_size, num_nodes, num_components, 100)
         } 
-    
+
+
 class FlowExpert(nn.Module):
     def __init__(self, gen_config, env_config):
         super(FlowExpert, self).__init__()
@@ -206,21 +206,19 @@ class FlowExpert(nn.Module):
         self.env_config = env_config
         self.flow_latent_dim = gen_config.flow_latent_dim
         self.num_trf_blocks = gen_config.num_trf_flow_blocks
+        self.flow_latent_upscale = nn.Linear(self.flow_latent_dim, self.gen_config.latent_dim)
+        self.component_linear = nn.Linear(in_features=self.env_config.max_number_of_components, out_features = self.flow_latent_dim)
+        self.edge_linear = nn.Linear(in_features = 1, out_features= self.flow_latent_dim)
 
         self.blocks = nn.ModuleList([
             CoreTransformerEncoder(d_model= self.flow_latent_dim, nhead=4, dropout=self.gen_config.dropout)
             for _ in range(self.gen_config.num_trf_flow_blocks)
         ])
 
-        self.component_linear = nn.Embedding(num_embeddings=env_config.num_components, embedding_dim = self.flow_latent_dim)
-        self.edge_linear = nn.Linear(in_features = 1, out_features= self.flow_latent_dim)
-        self.amount_linear = nn.Linear(1, self.flow_latent_dim)
-
-        self.flow_latent_upscale = nn.Linear(self.flow_latent_dim, self.gen_config.latent_dim)
-
+    
     def flat_gamma_to_matrix(self, system_gamma_inf, num_components):
-        flat = torch.tensor(system_gamma_inf, dtype=torch.float32, device=self.gen_config.training_device)
-        gamma_local = torch.zeros(num_components, num_components)
+        flat = torch.tensor(system_gamma_inf, device=self.gen_config.training_device)
+        gamma_local = torch.zeros((num_components, num_components), dtype = torch.float32)
         idx = 0
         for i in range(num_components):
             for j in range(i + 1, num_components):
@@ -230,25 +228,29 @@ class FlowExpert(nn.Module):
                     idx += 2
         return gamma_local
 
+
     def forward(self, x):
 
-        # component_params: (batch_size, num_components, 3)
-        # interaction_params: (batch_size, num_components, num_components, 1)
-        # amount: (batch_size, num_components, 1)
+        # components: from (num_components, 3)
+        # interaction_emb: from ComponentExpert of (num_components, num_components, k)
+        # x: amount (num_components, 1)
 
-        component_ids = torch.tensor([x.get("system_indices")], dtype=torch.long, device=self.gen_config.training_device)
-        gamma = self.flat_gamma_to_matrix(x.get("system_gammas_inf"), component_ids.shape[1])
-        interaction_params = gamma.unsqueeze(0).unsqueeze(-1).to(device=self.gen_config.training_device)
-        amount = torch.tensor(x.get("output_flows")['out0'][0:component_ids.shape[1]], device=self.gen_config.training_device, dtype=torch.float32).unsqueeze(-1)
+        components = torch.tensor(x.get("system_pure_crit").reshape(self.env_config.max_number_of_components, 3), dtype=torch.float32)
+        gamma = self.flat_gamma_to_matrix(x.get("system_gammas_inf"), components.shape[1])
+        interaction_params = gamma.unsqueeze(-1).to(device=self.gen_config.training_device)
+        amount = torch.tensor(x.get("output_flows")['out0'][0:components.shape[1]], dtype=torch.float32, device=self.gen_config.training_device).unsqueeze(-1)
 
-        nodes = self.component_linear(component_ids) + self.amount_linear(amount) # (batch_size, num_components, flow_latent_dim)
-        edges = self.edge_linear(interaction_params) # (batch_size, num_components, num_components, flow_latent_dim)
-        
+        nodes = self.component_linear(components) * amount # (num_components, flow_latent_dim)
+        edges = self.edge_linear(interaction_params) #(num_components, num_components, flow_latent_dim)
+
+        nodes, edges = nodes.unsqueeze(0), edges.unsqueeze(0)
+
         for block in self.blocks:
-            transformed_nodes = block(nodes, edges) # (batch_size, num_components, num_components, flow_latent_dim)
+            transformed_nodes = block(nodes, edges) 
         
-        flow_embedding = transformed_nodes.mean(dim=1) # (batch_size, flow_latent_dim)
-        return self.flow_latent_upscale(flow_embedding) # (batch_size, latent_dim)
+        transformed_nodes = transformed_nodes.squeeze(0) 
+        flow_embedding = transformed_nodes.mean(dim=0) # (num_outlets, flow_latent_dim)
+        return self.flow_latent_upscale(flow_embedding) # (num_outlets, latent_dim)
 
 class EdgeFlowExpert(nn.Module):
     def __init__(self, config, flow_expert: FlowExpert):
@@ -256,13 +258,12 @@ class EdgeFlowExpert(nn.Module):
         self.flow_expert = flow_expert 
         self.config = config
         self.latent_dim = self.config.latent_dim
-        
         self.is_recycle_emb = nn.Embedding(num_embeddings = 2, embedding_dim = self.latent_dim) # 0 for no, 1 for yes
 
         # no edge connection embedding 
         self.no_edge_emb = nn.Embedding(num_embeddings = 2, embedding_dim = self.latent_dim) # 0 for no, 1 for yes
 
-    def forward(self, edge_exists: bool, is_recycle: bool, carries_flow: bool, edge=None):
+    def forward(self, edge_exists: bool, is_recycle: bool, edge=None, feed_emb = None):
 
         if not edge_exists: 
             edge_idx = torch.tensor(0, dtype=torch.long, device=self.config.training_device)
@@ -272,22 +273,11 @@ class EdgeFlowExpert(nn.Module):
         edge_idx = torch.tensor(1, dtype=torch.long, device=self.config.training_device)
 
         # if its a recycle 
-        recycle_idx = torch.tensor(
-                    1 if is_recycle else 0,
-                    dtype=torch.long,
-                    device=self.config.training_device
-                )
-
+        recycle_idx = torch.tensor(1 if is_recycle else 0, dtype=torch.long, device=self.config.training_device)
         edge_emb = self.no_edge_emb(edge_idx)
         recycle_emb = self.is_recycle_emb(recycle_idx)
 
-        if not carries_flow:
-            return edge_emb + recycle_emb
-        
-         # stream edge: has mixture
-        latent_flow = self.flow_expert(edge) # check how to make this as component_params, interactions_params etc
-
-        combine_edge_embed = latent_flow + recycle_emb + edge_emb
+        combine_edge_embed = edge_emb + recycle_emb + feed_emb.mean(dim=0)
 
         return combine_edge_embed
     
@@ -300,25 +290,9 @@ class OpenStreamExpert(nn.Module):
         self.env_config = env_config
         self.latent_dim = self.gen_config.latent_dim
         self.linear_transform_open_stream = nn.Linear(self.latent_dim, self.latent_dim)
-        self.logit_linear = nn.Linear(in_features = self.latent_dim, out_features = 1, bias=True)
-        self.outlet_embedding = nn.Embedding(num_embeddings=self.env_config.max_outlets, embedding_dim=self.latent_dim)
 
-    def forward(self, x):
-        latent_flow = self.flow_expert(x) # check how to make this as component_params, interactions_params etc
-        open_stream_embed = self.linear_transform_open_stream(latent_flow)
-        
+    def forward(self, flow_emb):
+        open_stream_embed = self.linear_transform_open_stream(flow_emb)
+
         return open_stream_embed
-
-    def predict(self, x: torch.FloatTensor):
-        
-        # open_stream_embeddings: (B, N, latent_dim)
-        logits = self.logit_linear(x)  # (B, N, 1)
-        
-        return logits
-
-    def outlet_emb(self, x):
-        
-        outlet_emb = self.outlet_embedding(x)
-        
-        return outlet_emb
 

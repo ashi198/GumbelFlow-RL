@@ -117,7 +117,7 @@ def stochastic_beam_search(
     batch_internal_log_probs = [[0.0] for _ in range(batch_len)]
     batch_internal_gumbels = [[0.0] for _ in range(batch_len)]
     batch_internal_states = [[root_state] for root_state in root_states]
-    # EDIT FOR MOLECULES: We also collect _all_ leaves that are encountered during the sampling process and
+    # EDIT FOR FS: We also collect _all_ leaves that are encountered during the sampling process and
     # return _all_ of them.
     batch_collected_leaf_log_probs = [[] for _ in range(batch_len)]
     batch_collected_leaf_gumbels = [[] for _ in range(batch_len)]

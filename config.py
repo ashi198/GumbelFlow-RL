@@ -32,7 +32,7 @@ class GeneralConfig:
         self.CUDA_VISIBLE_DEVICES = "0,1,2,3"  # Must be set, as ray can have problems detecting multiple GPUs
         self.training_device = "cpu"  # Device on which to perform the supervised training
         self.num_epochs = 2  # Number of epochs (i.e., passes through training set) to train
-        self.batch_size_training = 16 #Batch size to use for the supervised training during finetuning. 
+        self.batch_size_training = 10 #Batch size to use for the supervised training during finetuning. 
         self.num_batches_per_epoch = None  # Can be None, then we just do one pass through generated dataset
 
         self.wall_clock_limit = None
@@ -57,7 +57,7 @@ class GeneralConfig:
             "keep_intermediate_trajectories": True,  # if True, we consider all intermediate, terminable trajectories
             "devices_for_workers": ["cpu"] * 1,
             "destination_path": "./data/generated_flowsheets.pickle",
-            "batch_size_per_worker": 1,  # Keep at one, as we only have three atoms from which we can start
+            "batch_size_per_worker": 1, 
             "batch_size_per_cpu_worker": 1,
             "search_type": "tasar",
             "beam_width": 32,
@@ -91,6 +91,7 @@ class EnvConfig:
 
         # maximum number of components present simultaneously in a flowsheet
         self.max_number_of_components = 3
+        self.max_simulator_tries = 10
 
         # ----- Phase equilibrium / property data -----
         self.systems_allowed = {
@@ -202,10 +203,9 @@ class EnvConfig:
             if key == "add_solvent":
                 self.add_solvent_start_index = i
                 break
-
-
+            
         # Action limits
-        self.max_total_units = 10  # overall cap on placed units (excluding feed)
+        self.max_total_units = 10 # overall cap on placed units (excluding feed)
         self.max_distillation_columns = 5
         self.max_decanters = 5
         self.max_split = 5
